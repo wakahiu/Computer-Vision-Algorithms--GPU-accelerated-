@@ -1,0 +1,11 @@
+This project involves a GPU-accelerated Machine learning approach for visual object detection to harness the inherent parallesm
+present in GPUs for rapid object detection. This project is motivated by the task of real-time face detection and is based on the Viola-jones algorithm.
+
+The Algorithm is composed of three parts.
+Feature vector and Integral image. 
+Allows features used by the detector to be calculated very rapidly. This is essentially a 2D prefix-sum (scan) operation. The integral image at a point (x,y) compises of the sum of all points above and to the left of it. Once computed, Haar-like features can be obtained at any scale and at any point in constant time. The exhaustive set of these features (shown below) is quite large. For a window of size 24x24 pixels, the feature space has more than 160,00 elements. However, this problem involves computing the features at different scales within the window and then scanning the window over the entire image. Since both these operations are independent, they render theyselves to parallesism. Each thread calculates these features at different scales and threads can be assigned to calcuate the feature vectors for specific regions of the image.
+
+Adaboost based learning algorithm. 
+Selects a small number of features from a larger set. Within an image region, the number of Haar-like features is enormous, a modified Adaboost approach allows us construct a feature selection process. The After the final classifier has been trained (offline), the results of 
+
+Cascade of complex classifiers that act as a object-specific focus of attention mechanism. It works by discarding backgroud regions that are unlikely to contain the object of interest
