@@ -41,9 +41,6 @@ int main()
 	//Convert the images to gray scale
 	Mat gray_image1 = toGray(image1);
 	Mat gray_image2 = toGray(image2);
-	
-	//namedWindow(img1.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
-	//namedWindow(img2.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
 
 	//
 	// -- Step 1: Detect the keypoints using SURF detector
