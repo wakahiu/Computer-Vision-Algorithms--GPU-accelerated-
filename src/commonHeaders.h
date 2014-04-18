@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <vector>
 #include <string>
+#include <math.h>
 
 //OpenCV is modular
 #include <opencv2/opencv.hpp>
