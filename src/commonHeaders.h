@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <math.h>
+#include <algorithm>
 
 //OpenCV is modular
 #include <opencv2/opencv.hpp>
