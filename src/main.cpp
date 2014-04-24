@@ -129,9 +129,9 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	Mat newImg( rows, cols, CV_32FC3);
 	float * newPtr = (float *)newImg.data;
 	
-	Mat 	dataMat( rows, cols, CV_16UC4 );
-	unsigned short *	dataMatPtr = (unsigned short *)dataMat.data;
-	int 	dataMatStep = dataMat.step/2;
+	Mat 	dataMat( rows, cols, CV_32FC4 );
+	float *	dataMatPtr = (float *)dataMat.data;
+	int 	dataMatStep = dataMat.step/4;
 	
 	cout  << "dataMatStep " << dataMatStep << endl;
 	
@@ -196,7 +196,6 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 					tempPtr[idx+1] = sqrt(dx*dx+dy*dy);		//Magnitude of gradient
 					tempPtr[idx+2] = atan2(dy,dx);			//Orientation of gradient
 					
-					cout << tempPtr[idx+2] << " " << endl;
 
 					//Early termination. These points are unlikely to be keypoints
 					//Anyway.
@@ -373,33 +372,47 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 					
 					bool isKeyPoint = ((tempPtr[idx+0] / maxD) >  threshold);
 					
-					float phi = 2*M_PI /36.0;		//Radians per bin.
+					float phi = M_PI /18.0;		//Radians per bin.
 					
 					if(isKeyPoint){
 					
 						dataMatPtr[dataMatidx+0] = i/3;		//Position	x
 						dataMatPtr[dataMatidx+1] = j;		//Position	y
 						
+						float bins[36];
+						for(int m = 0; m < 36 ; m++){
+							bins[m] = 0;
+						}
+						
 						//Assigning orientation. Use 36 bins and weight sample 
 						//by gradient magnitude.
 						for(int y = j-hw; y <= j+hw; y++){
-							for(int x = i-hw; x <= i+hw*3 ;x+=3){
+							for(int x = i-hw*3; x <= i+hw*3 ;x+=3){
 							
 								int 	kernIdx = step*y + x;
 								float 	mag = tempPtr[kernIdx+1];
 								float	dir = tempPtr[kernIdx+2];
 								
-								int bin = dir/phi;
-								cout << bin << " ";
+								int binIdx = dir/phi+17;
 								
+								//Some NANs and other floating point arithmentic artefacts
+								if(binIdx <0 || binIdx >= 36)
+									continue;
+								
+								
+								bins[binIdx] += mag;
 								
 							}
 						}
-			
+						
+						for(int m = 0; m < 36 ; m++){
+							cout << bins[m] << " ";
+						} 
+						cout << endl;
 						dataMatPtr[dataMatidx+2] = 0;		//scale
 						dataMatPtr[dataMatidx+3] = 0;
 						
-						plot( plotImg , i/3 , j , 0 , 255 , 0 );
+						//plot( plotImg , i/3 , j , 0 , 255 , 0 );
 						
 					}
 					continue;
