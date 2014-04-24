@@ -1,5 +1,6 @@
 COMPILER = g++
 FLAGS = -o
+FLAGS_EXTRA = -Wextra
 EXE = prog
 SRC = *.cpp *.h
 LINK = -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_nonfree -lopencv_features2d -lopencv_flann -lopencv_calib3d
@@ -11,4 +12,7 @@ main:
 run:
 	@echo "running the program"
 	./$(EXE)
+	
+extra:
+	$(COMPILER) $(SRC) $(LINK) $(INCLUDE) $(FLAGS) $(FLAGS_EXTRA) $(EXE)
 

@@ -30,12 +30,12 @@ Mat toGray(Mat img){
 
 Mat GaussianBlurr(Mat img, float * GaussKernel,int hw){
 
-	//Mat blurr_img = img.clone();
-	Mat blurr_img( img.rows,img.cols,CV_8UC3);
+	Mat blurr_img( img.rows,img.cols,CV_32FC3);
 	
 	int w = 2*hw+1;
+	int bstep = blurr_img.step/4;
 	unsigned char * imgPtr = (unsigned char *)img.data;
-	unsigned char * blurrPtr = (unsigned char *)blurr_img.data;
+	float * blurrPtr = (float *)blurr_img.data;
 	
 	for(int j = 0+hw; j < (img.rows-hw); j++){
 		for(int i = 0+hw; i <(img.cols-hw)*3; i+=3){
@@ -54,9 +54,9 @@ Mat GaussianBlurr(Mat img, float * GaussKernel,int hw){
 				}
 			}
 			
-			blurrPtr[blurr_img.step*j+i+0] = b;
-			blurrPtr[blurr_img.step*j+i+1] = g;
-			blurrPtr[blurr_img.step*j+i+2] = r;
+			blurrPtr[bstep*j+i+0] = b;
+			blurrPtr[bstep*j+i+1] = g;
+			blurrPtr[bstep*j+i+2] = r;
 			
 			
 		}
@@ -90,22 +90,24 @@ void plot(Mat img,int x,int y,int b, int g, int r){
 Mat findImageDiff(Mat image1, Mat image2, float s){
 
 	//Consider using integers/floats instead of unsigned Uint_8
-	Mat imgDiff( image1.rows, image1.cols,CV_8UC3);
+	Mat imgDiff( image1.rows, image1.cols,CV_32FC3);
 	
-	unsigned char * img1Ptr = (unsigned char *)image1.data;
-	unsigned char * img2Ptr = (unsigned char *)image2.data;
-	unsigned char * resultPtr = (unsigned char *)imgDiff.data;
+	float * img1Ptr = (float *)image1.data;
+	float * img2Ptr = (float *)image2.data;
+	float * resultPtr = (float *)imgDiff.data;
+	
+	int  step = imgDiff.step/4;
 	
 	for(int j =0 ; j < image1.rows ; j++){
-		for(int i = 0 ; i < image1.step; i += 3){
+		for(int i = 0 ; i < step; i += 3){
 		
-			int diff_b = (img2Ptr[imgDiff.step*j+i+0] - img1Ptr[imgDiff.step*j+i+0])/(1-s);
-			int diff_g = (img2Ptr[imgDiff.step*j+i+1] - img1Ptr[imgDiff.step*j+i+1])/(1-s);
-			int diff_r = (img2Ptr[imgDiff.step*j+i+2] - img1Ptr[imgDiff.step*j+i+2])/(1-s); 
+			float diff_b = abs((img2Ptr[step*j+i+0] - img1Ptr[step*j+i+0])/(1-s));
+			float diff_g = abs((img2Ptr[step*j+i+1] - img1Ptr[step*j+i+1])/(1-s));
+			float diff_r = abs((img2Ptr[step*j+i+2] - img1Ptr[step*j+i+2])/(1-s)); 
 			
-			resultPtr[imgDiff.step*j+i+0] = diff_b;
-			resultPtr[imgDiff.step*j+i+1] = diff_g;
-			resultPtr[imgDiff.step*j+i+2] = diff_r;
+			resultPtr[step*j+i+0] = diff_b;
+			resultPtr[step*j+i+1] = diff_g;
+			resultPtr[step*j+i+2] = diff_r;
 			
 		}
 	}
@@ -114,7 +116,7 @@ Mat findImageDiff(Mat image1, Mat image2, float s){
 
 
 //Find the 3d image gradients from a stack of Difference of gaussians. 
-Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hw){
+Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hwGrad, int hwFeat){
 	
 	float hthr =1.5;
 	
@@ -124,7 +126,7 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	//Assumes all the images have the same dimensions.
 	int rows = imageStack[0].rows;
 	int cols = imageStack[0].cols;
-	int step = imageStack[0].step;
+	int step = imageStack[0].step/4;
 	
 	Mat newImg( rows, cols, CV_32FC3);
 	float * newPtr = (float *)newImg.data;
@@ -161,10 +163,12 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	
 			float * tempPtr = (float *)tempImg.data;
 	
-			unsigned char * currPtr = (unsigned char *)currImg.data;
-			unsigned char * nextPtr = (unsigned char *)nextImg.data;
-			unsigned char * prevPtr = (unsigned char *)prevImg.data;
+			float * currPtr = (float *)currImg.data;
+			float * nextPtr = (float *)nextImg.data;
+			float * prevPtr = (float *)prevImg.data;
 			
+			float dx_prev = 0.0;
+			float dy_prev = 0.0;
 			
 			//Now we have the image. Consider all the pixels. Remove unstable 
 			//Keypoints
@@ -172,49 +176,81 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 				for(int i = 3 ; i < step-3; i += 3){
 					
 					int idx = step*j + i;
-					float D = abs( currPtr[idx] );
 					
-					//Gradients. 
+					//Ignore edge pixels.
+					if( j < hwGrad || i < 3*hwGrad || j >= rows -hwGrad || i >= (step -3*hwGrad)){
+						tempPtr[idx+0] = 0;
+						tempPtr[idx+1] = 0;
+						tempPtr[idx+2] = 0;
+						continue;
+					}
 					
-					//First Derivative. 
-					//"Forward
-					float dx_f = currPtr[idx+3] - currPtr[idx];
-					float dy_f = currPtr[idx+step] - currPtr[idx];
-					float ds_f = nextPtr[idx] - currPtr[idx];
+					float dx = 0.0;
+					float dy = 0.0;
+					int patchCount = 0;
 					
-					//"backward"
-					float dx_b = currPtr[idx] - currPtr[idx-3];
-					float dy_b = currPtr[idx] - currPtr[idx-step];
-					float ds_b = currPtr[idx] - prevPtr[idx];
+					//Calculate the gradient by considering neighbouring pixels.
+					for(int y = j-hwGrad; y <= j+hwGrad; y++){
+						for(int x = i-hwGrad*3; x <= i+hwGrad*3 ;x+=3){
+						
+							int kernIdx = step*y + x;
+							dx += currPtr[kernIdx+3] - currPtr[kernIdx];
+							dy += currPtr[kernIdx+step] - currPtr[kernIdx];
+							patchCount++;
+						}
+					}
+					//Average the gradients.
+					dx /= patchCount;
+					dy /= patchCount;
 					
-					//Average them.
-					float dx = (dx_f + dx_b)/2;
-					float dy = (dy_f + dy_b)/2;
-					float ds = (ds_f + ds_b)/2;
+					//Gradient and magnitude.
+					tempPtr[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
+					tempPtr[idx+2] = atan2(dy,dx);				//Orientation of gradient
+					float D = currPtr[idx];
 					
-					
-					tempPtr[idx+1] = sqrt(dx*dx+dy*dy);		//Magnitude of gradient
-					tempPtr[idx+2] = atan2(dy,dx);			//Orientation of gradient
-					
-
 					//Early termination. These points are unlikely to be keypoints
 					//Anyway.
-					if(D/512 < threshold*0.25 ){
+					if(D < threshold ){
 						tempPtr[idx+0] = 0.0;			
 						continue;
 					}
 					
-					//if(D > 100)
-					//	plot( plotImg , i/3 , j , 255 , 0 , 0 );
-						
+					//Key point localization.
+					//Eliminate points along the edges.
+					float a = dx*dx;
+					float b = 2*dx*dy;
+					float c = dy*dy;
 					
+					float elipDet = (b*b+(a-c)*(a-c));
+
+					float l1 = 0.5*(a+c+sqrt(elipDet));
+					float l2 = 0.5*(a+c-sqrt(elipDet));
+					
+					float R = (l1*l2 - 1e-8*(l1+l2)*(l1+l2));
+					
+					if( R < 0 ){
+							//Eliminate points along edges							
+							tempPtr[idx+0] = 0;
+							continue;
+					}else{
+						//cout << tempPtr[idx+1] << " ";
+					}
+					
+					//First Derivative.
+					float ds_f = nextPtr[idx] - currPtr[idx];	//Forwards
+					float ds_b = currPtr[idx] - prevPtr[idx];	//Backwards
+					
+					//Average them.
+					float ds = (ds_f + ds_b)/2;
 					float dxVec[3] = {-dx,-dy,-ds};
-					
+	
 					//Second Derivatives
-					float ddx = dx_f-dx_b;
-					float ddy = dy_f-dy_b;
-					float dds = ds_f-ds_b;
+					float ddx = dx - dx_prev;
+					float ddy = dy - dy_prev;
+					float dds = ds_f - ds_b;
 					
+					dx_prev = dx;
+					dy_prev = dy;
 					
 					//Second derivative matrix
 				
@@ -231,29 +267,26 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 								DDMat[0][1]*DDMat[1][0]*DDMat[2][2] +
 								DDMat[0][0]*DDMat[1][2]*DDMat[2][1]	);
 				
-				
+					
 					if(det != 0){
-					
-					
-				
+						
 						//Adjugate matrix. Matrix of coffactors.
-						float CC_00 = DDMat[2][2]*DDMat[3][3] - DDMat[2][3]*DDMat[3][2];
-						float CC_01 = DDMat[1][3]*DDMat[3][2] - DDMat[1][2]*DDMat[3][3];
-						float CC_02 = DDMat[1][2]*DDMat[2][3] - DDMat[1][3]*DDMat[2][2];
+						float CC_00 = DDMat[1][1]*DDMat[2][2] - DDMat[1][2]*DDMat[2][1];
+						float CC_01 = DDMat[0][2]*DDMat[2][1] - DDMat[0][1]*DDMat[2][2];
+						float CC_02 = DDMat[0][1]*DDMat[1][2] - DDMat[0][2]*DDMat[1][1];
 				
-						float CC_10 = DDMat[2][3]*DDMat[3][1] - DDMat[2][1]*DDMat[3][3];
-						float CC_11 = DDMat[1][1]*DDMat[3][3] - DDMat[1][3]*DDMat[3][1];
-						float CC_12 = DDMat[1][3]*DDMat[2][1] - DDMat[1][1]*DDMat[2][3];
+						float CC_10 = DDMat[1][2]*DDMat[2][0] - DDMat[1][0]*DDMat[2][2];
+						float CC_11 = DDMat[0][0]*DDMat[2][2] - DDMat[0][2]*DDMat[2][0];
+						float CC_12 = DDMat[0][2]*DDMat[1][0] - DDMat[0][0]*DDMat[1][2];
 				
-						float CC_20 = DDMat[2][1]*DDMat[3][2] - DDMat[2][2]*DDMat[3][1];
-						float CC_21 = DDMat[1][2]*DDMat[3][1] - DDMat[1][1]*DDMat[3][2];
-						float CC_22 = DDMat[1][1]*DDMat[2][2] - DDMat[1][2]*DDMat[2][1];
+						float CC_20 = DDMat[1][0]*DDMat[2][1] - DDMat[1][1]*DDMat[2][0];
+						float CC_21 = DDMat[0][1]*DDMat[2][0] - DDMat[0][0]*DDMat[2][1];
+						float CC_22 = DDMat[0][0]*DDMat[1][1] - DDMat[0][1]*DDMat[1][0];
 					
 						float CCMat[3][3] ={{CC_00,	CC_01,	CC_02},
 											{CC_10,	CC_11,	CC_12},
 											{CC_20,	CC_21,	CC_22}};
 					
-				
 						//Inverse matrix.
 						CCMat[0][0] /= det;	CCMat[0][1] /= det;	CCMat[0][2] /= det;
 						CCMat[1][0] /= det;	CCMat[1][1] /= det;	CCMat[1][2] /= det;
@@ -265,86 +298,14 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 											CCMat[2][0]*dxVec[0]+CCMat[2][1]*dxVec[1]+CCMat[2][2]*dxVec[2] };
 						
 						//Remove low contrast extrema.
-						float xbarThr = 0.3;
+						float xbarThr = 0.75;
 						if( ( abs( XBarVec[0] ) > xbarThr || abs( XBarVec[1] ) > xbarThr || abs( XBarVec[2] ) > xbarThr ) ){
-							D = 0;
-							//plot( plotImg , i/3 , j , 255 , 0 , 255 );
+							tempPtr[idx+0] = 0;
+							continue;
 						}else{
-							D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0;
-							
+							D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0;	
 						}
-					}
-				
-					
-					//Eliminate poorly localized extrema.
-					float HessianMat[2][2] = {	{ddx,	dx*dy},
-												{dx*dy,	ddy}};
-					
-					float detHess = HessianMat[0][0]*HessianMat[1][1] - HessianMat[0][1]*HessianMat[1][0];
-					float trHess = HessianMat[0][0] + HessianMat[1][1];
-					
-					float a = dx*dx;
-					float b = 2*dx*dy;
-					float c = dy*dy;
-					
-					float elipDet = (b*b+(a-c)*(a-c));
-
-					float l1 = 0.5*(a+c+sqrt(elipDet));
-					float l2 = 0.5*(a+c-sqrt(elipDet));
-					
-					float R = (l1*l2 - 0.03*(l1+l2)*(l1+l2));
-					
-					if( R < 0 ){
-							D = 0.0;
-					}else{
-						if( D > 100){
-							//cout << l1 << " " << l2 << "\t";
-							if( l1 == 0 && l2 == 0){
-								//plot( plotImg , i/3 , j , 250 , 55 , 255 );
-							}
-							else{
-								D = 0.0;
-								//plot( plotImg , i/3 , j , 20 , 255 , 155 );
-							}
-						}
-					}
-						
-						
-					//Determine the priciple curvature. The ratio of eigenvalues increases as one of the 
-					//eigenvalues of the Hessian matrix increases while one stays constant.
-					
-					/*
-					if( detHess > 0 ){
-						float edgeStrength = trHess*trHess/detHess;
-						if( edgeStrength > hessThresh ){
-							
-							//Rarely enters this part of the loop.
-								
-						}else{
-							//if(D>100)
-							//	plot( plotImg , i/3 , j , 255 , 25 , 100 );
-							//Do nothing.
-						}
-						//Mostly points along the edges.
-					}else if( detHess < 0 ) {
-					//Mostly points along the edges.
-						
-					}else	// detHess == 0.
-					{
-						//Mostly points along the edges.
-						if(R >= 0){
-						
-							//Reduce remove lines further.
-							R = (l1*l2 - 0.8*(l1+l2)*(l1+l2));
-					
-							if( R < 0 ){
-									
-									if( D > 100)
-										plot( plotImg , i/3 , j , 0 , 255 , 0 );
-									D = 0.0;
-							}
-						}		
-					}*/
+					}	
 					
 					tempPtr[idx+0] = D;
 
@@ -362,7 +323,7 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 					int dataMatidx = dataMatStep*j + i;
 					
 					//Ignore edge pixels.
-					if( j < hw || i < 3*hw || j >= rows -hw || i >= (step -3*hw)){
+					if( j < hwFeat || i < 3*hwFeat || j >= rows -hwFeat || i >= (step -3*hwFeat)){
 						dataMatPtr[dataMatidx+0] = 0;
 						dataMatPtr[dataMatidx+1] = 0;
 						dataMatPtr[dataMatidx+2] = 0;
@@ -370,7 +331,7 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 						continue;
 					}
 					
-					bool isKeyPoint = ((tempPtr[idx+0] / maxD) >  threshold);
+					bool isKeyPoint = ((tempPtr[idx+0]) >=  threshold);
 					
 					float phi = M_PI /18.0;		//Radians per bin.
 					
@@ -380,43 +341,48 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 						dataMatPtr[dataMatidx+1] = j;		//Position	y
 						
 						float bins[36];
+						float 	aveMag = 0.0;
 						for(int m = 0; m < 36 ; m++){
 							bins[m] = 0;
 						}
 						
 						//Assigning orientation. Use 36 bins and weight sample 
 						//by gradient magnitude.
-						for(int y = j-hw; y <= j+hw; y++){
-							for(int x = i-hw*3; x <= i+hw*3 ;x+=3){
+						for(int y = j-hwFeat; y <= j+hwFeat; y++){
+							for(int x = i-hwFeat*3; x <= i+hwFeat*3 ;x+=3){
 							
 								int 	kernIdx = step*y + x;
 								float 	mag = tempPtr[kernIdx+1];
 								float	dir = tempPtr[kernIdx+2];
-								
+					
 								int binIdx = dir/phi+17;
-								
-								//Some NANs and other floating point arithmentic artefacts
-								if(binIdx <0 || binIdx >= 36)
-									continue;
-								
-								
 								bins[binIdx] += mag;
+								aveMag += mag; 
 								
 							}
 						}
 						
 						for(int m = 0; m < 36 ; m++){
-							if(bins[m] < 0){
-								plot( plotImg , i/3 , j , 0 , 0 , 255 );
-								continue;
-							}
+							//cout << bins[m] << " ";
 						} 
 						dataMatPtr[dataMatidx+2] = 0;		//scale
 						dataMatPtr[dataMatidx+3] = 0;
 						
-						//plot( plotImg , i/3 , j , 0 , 255 , 0 );
-						
+						plot( plotImg , i/3 , j , 0 , 255 , 0 );
+						count++;
+						/*
+						if( aveMag == 0){
+							plot( plotImg , i/3 , j , 0 , 0 , 255 );
+						}else{
+							plot( plotImg , i/3 , j , 0 , 255 , 0 );
+						}*/
+							
 					}
+					/*
+					if(tempPtr[idx+1] > 0){
+							plot( plotImg , i/3 , j , 0 , 255 , 0 );
+					}*/
+					
 					continue;
 					/*
 					newPtr[idx+0] = ((newPtr[idx+0] == 1) ||	((tempPtr[idx+0] / maxD) >  threshold)) ? 1.0 : 0.0;
@@ -523,11 +489,13 @@ int main()
 	}
 	
 	//float threshold =0.9979;
-	float threshold =0.93;
+	float threshold = 1;
+	int hwGrad = 4;
+	int hwFeat = 8;
 	//Keypoint localization. Now we have keypoints, we would like to filter out
 	//unstable key points and edges.
-	Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, 8);
-	Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, 8);
+	Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, hwGrad, hwFeat);
+	Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, hwGrad, hwFeat);
 	
 	namedWindow(img1.c_str(),WINDOW_AUTOSIZE);
 	namedWindow(img2.c_str(),WINDOW_AUTOSIZE);
@@ -544,7 +512,6 @@ int main()
 
 	
 	waitKey(0);
-	return 0;
 	
 	
 	
@@ -559,6 +526,10 @@ int main()
 	
 	detector.detect(gray_image1,keyPoints_object);
 	detector.detect(gray_image2,keyPoints_scene);
+	
+	cout << keyPoints_object.size() << endl;
+	
+	return 0;
 	
 	
 	//Calculate descriptors (feature vectors);
