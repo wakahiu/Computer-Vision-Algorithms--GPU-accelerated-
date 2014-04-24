@@ -1,0 +1,5 @@
+Computer-Vision-Algorithms--GPU-accelerated-
+============================================
+SIFT feature detection for GPU accelerated panorama image stitching. 
+
+Harneses the massive parallism inherent in GPUs to identify SIFT features.
