@@ -1,5 +1,8 @@
 #include "commonHeaders.h"
 
+#define OCTAVES 2
+#define SCALES 5
+
 //Converts the image to gray scale using equal weighting.
 Mat toGray(Mat img){
 	
@@ -116,12 +119,9 @@ Mat findImageDiff(Mat image1, Mat image2, float s){
 
 
 //Find the 3d image gradients from a stack of Difference of gaussians. 
-Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hwGrad, int hwFeat){
-	
-	float hthr =1.5;
+Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hwGrad, int hwFeat, vector<KeyPoint> &kp){
 	
 	float count = 0.0;
-	float hessThresh = (hthr +1)*(hthr +1)/hthr;
 	
 	//Assumes all the images have the same dimensions.
 	int rows = imageStack[0].rows;
@@ -145,6 +145,8 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	for(int o = 0; o < octaves ; o++ ){
 		for(int s = 1 ; s < scales-1 ; s++ ){
 		
+			float sigmaScale = pow(2,o)*((float)s/SCALES+1 + 0.5/SCALES); 
+			cout << sigmaScale << endl;
 			float maxD = 0.0;
 			
 			int ns = (s+1)%scales;
@@ -298,7 +300,7 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 											CCMat[2][0]*dxVec[0]+CCMat[2][1]*dxVec[1]+CCMat[2][2]*dxVec[2] };
 						
 						//Remove low contrast extrema.
-						float xbarThr = 0.75;
+						float xbarThr = 1.25;
 						if( ( abs( XBarVec[0] ) > xbarThr || abs( XBarVec[1] ) > xbarThr || abs( XBarVec[2] ) > xbarThr ) ){
 							tempPtr[idx+0] = 0;
 							continue;
@@ -312,10 +314,10 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 				}
 			}
 			
-			//Done getting robust keypoints and calculating image attributes.
-			//Now we calculate the feature descritor vectors. x,y, scale and orienation. 
 			
-			//Normalize them
+			//Done getting robust keypoints and calculating image attributes.
+			//Now we calculate the feature descriptor vectors. x, y, scale and orienation. 
+			
 			for(int j =0 ; j < rows; j++ ){
 				for(int i = 0  ; i < step; i += 3){
 				
@@ -347,7 +349,7 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 						}
 						
 						//Assigning orientation. Use 36 bins and weight sample 
-						//by gradient magnitude.
+						//by gradient magnitude and gaussian
 						for(int y = j-hwFeat; y <= j+hwFeat; y++){
 							for(int x = i-hwFeat*3; x <= i+hwFeat*3 ;x+=3){
 							
@@ -356,41 +358,34 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 								float	dir = tempPtr[kernIdx+2];
 					
 								int binIdx = dir/phi+17;
-								bins[binIdx] += mag;
+								bins[binIdx] += mag * sigmaScale;
 								aveMag += mag; 
 								
 							}
 						}
 						
+						//Assign the orientation as the highest peak. There could be
+						//More peaks which get substantially close to the max value.
+						//Also perform polynomial curve fitting for more acurate 
+						//Orientation. Will see if all this work is worth doing.
+						float highestPeak =0.0;
 						for(int m = 0; m < 36 ; m++){
+							if(bins[m] > highestPeak){
+								highestPeak = bins[m];
+							}
 							//cout << bins[m] << " ";
 						} 
-						dataMatPtr[dataMatidx+2] = 0;		//scale
-						dataMatPtr[dataMatidx+3] = 0;
+						dataMatPtr[dataMatidx+2] = highestPeak;		//scale
+						dataMatPtr[dataMatidx+3] = sigmaScale;
 						
-						plot( plotImg , i/3 , j , 0 , 255 , 0 );
+						//plot( plotImg , i/3 , j , 0 , 255 , 0 );
 						count++;
-						/*
-						if( aveMag == 0){
-							plot( plotImg , i/3 , j , 0 , 0 , 255 );
-						}else{
-							plot( plotImg , i/3 , j , 0 , 255 , 0 );
-						}*/
-							
+						
+						KeyPoint newKp(i/3,j,sigmaScale,highestPeak,o);
+						kp.push_back( newKp );
+						
 					}
-					/*
-					if(tempPtr[idx+1] > 0){
-							plot( plotImg , i/3 , j , 0 , 255 , 0 );
-					}*/
-					
-					continue;
-					/*
-					newPtr[idx+0] = ((newPtr[idx+0] == 1) ||	((tempPtr[idx+0] / maxD) >  threshold)) ? 1.0 : 0.0;
-					
-					if(newPtr[idx+0] ==1){
-						plot( plotImg , i/3 , j , 0 , 255 , 0 );
-					}*/
-					
+					continue;	
 				}	
 			}
 			
@@ -405,9 +400,10 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	
 int main()
 {
+	
 
-	String img1("panorama_image1.jpg");
-	String img2("panorama_image2.jpg");
+	String img1("panorama_image2.jpg");
+	String img2("panorama_image1.jpg");
 	
 	Mat image1 = imread(img1.c_str());
 	Mat image2 = imread(img2.c_str());
@@ -424,8 +420,10 @@ int main()
 	Mat gray_image1 = toGray(image1);
 	Mat gray_image2 = toGray(image2);
 	
-	int octaves = 1;
-	int scales = 5;
+	
+	
+	int octaves = OCTAVES;
+	int scales = SCALES;
 	
 	float sf = 1.0f/scales;
 	
@@ -488,32 +486,33 @@ int main()
 
 	}
 	
+	vector<KeyPoint> keyPoints1;
+	vector<KeyPoint> keyPoints2;
+	
+	
 	//float threshold =0.9979;
 	float threshold = 1;
 	int hwGrad = 4;
 	int hwFeat = 8;
 	//Keypoint localization. Now we have keypoints, we would like to filter out
 	//unstable key points and edges.
-	Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, hwGrad, hwFeat);
-	Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, hwGrad, hwFeat);
+	Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints1);
+	Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints2);
 	
-	namedWindow(img1.c_str(),WINDOW_AUTOSIZE);
-	namedWindow(img2.c_str(),WINDOW_AUTOSIZE);
+	
+	namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
+	namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
+	resizeWindow(img1.c_str(),800,600);
+	resizeWindow(img2.c_str(),800,600);
 	imshow(img1.c_str(),image1);
 	imshow(img2.c_str(),image2);
 	
-	waitKey(0);
-
-	
-	namedWindow(img1.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
-	namedWindow(img2.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
-	imshow(img1.c_str(),img1Result);
-	imshow(img2.c_str(),img2Result);
 
 	
 	waitKey(0);
+
 	
-	
+	cout << keyPoints1.size() << endl;
 	
 	//
 	// -- Step 1: Detect the keypoints using SURF detector
@@ -521,16 +520,28 @@ int main()
 	
 	SurfFeatureDetector detector(minHessian);
 	
-	vector<KeyPoint> keyPoints_object;
-	vector<KeyPoint> keyPoints_scene;
+	//detector.detect(gray_image1,keyPoints1);
+	//detector.detect(gray_image2,keyPoints2);
 	
-	detector.detect(gray_image1,keyPoints_object);
-	detector.detect(gray_image2,keyPoints_scene);
+	Vector<KeyPoint> keypts1;
+	Vector<KeyPoint> keypts2;
 	
-	cout << keyPoints_object.size() << endl;
+	int i = 0;
+	for( vector<KeyPoint>::iterator kpIter = keyPoints1.begin(); i < 5 && kpIter != keyPoints1.end() ; ++i, ++kpIter ){
+		cout << "Here " << endl;
+	} 
 	
-	return 0;
+	Mat kp1;
+	Mat kp2;
+	drawKeypoints(gray_image1,keyPoints1, kp1 , Scalar::all(-1),DrawMatchesFlags::DEFAULT);
+	drawKeypoints(gray_image2,keyPoints2, kp2 , Scalar::all(-1),DrawMatchesFlags::DEFAULT);
 	
+	
+	//namedWindow(img1.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
+	//namedWindow(img2.c_str(),WINDOW_AUTOSIZE);		//Create a window for display
+	//imshow(img1.c_str(),kp1);
+	//imshow(img2.c_str(),kp2);
+	//waitKey(0);
 	
 	//Calculate descriptors (feature vectors);
 	SurfDescriptorExtractor extractor;
@@ -538,12 +549,20 @@ int main()
 	Mat descriptors_object;
 	Mat descriptors_scene;
 	
-	extractor.compute(gray_image1,keyPoints_object, descriptors_object);
-	extractor.compute(gray_image2,keyPoints_scene, descriptors_scene);
+	extractor.compute(gray_image1,keyPoints1, descriptors_object);
+	extractor.compute(gray_image2,keyPoints2, descriptors_scene);
 	
-	FlannBasedMatcher matcher;
+	//FlannBasedMatcher matcher;
+	BFMatcher matcher(NORM_L2);
 	vector<DMatch> matches;
 	matcher.match(descriptors_object, descriptors_scene,matches);
+	
+	namedWindow("Matches",CV_WINDOW_NORMAL);
+	Mat matchImg;
+	drawMatches(image1,keyPoints1,image2,keyPoints2,matches,matchImg);
+	resizeWindow("Matches",900,400);
+	imshow("Matches",matchImg);
+	waitKey(0);
 	
 	double maxDist = 0.0;
 	double minDist = 100.0;
@@ -558,22 +577,41 @@ int main()
 	cout << "Maximum Distance: " << maxDist << endl;
 	cout << "Minimum Distance: " << minDist << endl;
 	
+	vector<KeyPoint> kpgood1;
+	vector<KeyPoint> kpgood2;	
 	//Use only good matches
-	double distFilter = 3.0;
+	double distFilter = 2;
 	vector<DMatch> goodMatches;
 	for(int i = 0; i < descriptors_object.rows; i++){
-		if( matches[i].distance  < minDist * distFilter ){
+		if( matches[i].distance  < minDist * distFilter )
 			goodMatches.push_back(matches[i]);
-		}
 	}
+		
+	cout << goodMatches.size() << " SZ" << endl;
 	
 	vector<Point2f> obj;
 	vector<Point2f> scn;
 	
+
+	
 	for(int i = 0; i < goodMatches.size(); i++){
-		obj.push_back(keyPoints_object[goodMatches[i].queryIdx].pt );
-		scn.push_back(keyPoints_scene[goodMatches[i].trainIdx].pt );
+		
+		obj.push_back(keyPoints1[goodMatches[i].queryIdx].pt );
+		scn.push_back(keyPoints2[goodMatches[i].trainIdx].pt );
+		
+		//kpgood1.push_back(keyPoints1[goodMatches[i].]);
 	}
+	
+	cout << "After Filtering : " << obj.size() << endl;
+	
+	
+	/*
+	namedWindow("Matches",1);
+	Mat matchImg;
+	drawMatches(image1,keyPoints1,image2,keyPoints2,goodMatches,matchImg);
+	imshow("Matches",matchImg);
+	waitKey(0);
+	*/
 	
 	//Find the homography matrix
 	Mat H = findHomography(obj,scn,CV_RANSAC);
@@ -583,7 +621,9 @@ int main()
 	Mat half(result,Rect(0,0,image2.cols,image2.rows));
 	
 	image2.copyTo(half);
-	imshow("Result",half);
+	namedWindow("Result",CV_WINDOW_NORMAL);
+	resizeWindow("Result",900,400);
+	imshow("Result", result );
 	
 	waitKey(0);
     return 0;
