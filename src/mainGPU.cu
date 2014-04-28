@@ -3,6 +3,10 @@
 #define OCTAVES 2
 #define SCALES 5
 
+//Constant buffer for the gaussian kernel
+#define D_MAX 50		//10000Bytes < 64KB
+__constant__ float d_const_Gaussian[D_MAX*D_MAX];
+
 //Converts the image to gray scale using equal weighting.
 Mat toGray(Mat img){
 	
@@ -146,13 +150,13 @@ Mat findImageDiff(Mat image1, Mat image2, float s){
 }
 
 //
-// your __global__ kernel can go here, if you want:
+// Gaussian Image blurr. Uses shared memory for speed up.
 //
-/*
-__global__ void blurr_GPU(float * d_imageArray,float * d_imageArrayResult, float *  d_dev_Gaussian, int w,int h, int r){
+
+__global__ void GaussianBlurr_GPU(unsigned char * d_imageArray,float * d_imageArrayResult, int w,int h, int r){
 	
 	int d = 2*r + 1;
-	extern __shared__ float picBlock[];
+	extern __shared__ float  picBlock[];
 	
 	int x = blockDim.x*blockIdx.x + threadIdx.x; 
 	int y = blockDim.y*blockIdx.y + threadIdx.y;
@@ -161,6 +165,7 @@ __global__ void blurr_GPU(float * d_imageArray,float * d_imageArrayResult, float
 		return;
 		
 	int idx;
+	
 	unsigned int idxN, idxS, idxW, idxE;
 	float tempR = 0.0;
     float tempG = 0.0;
@@ -172,7 +177,7 @@ __global__ void blurr_GPU(float * d_imageArray,float * d_imageArrayResult, float
 	int i, j;
 	int iSh, jSh;
 	
-	//Copy the gaussian kernel into shared memory
+	//Copy the image into shared memory
 	//Blocks that do not require boundry check
 	if( (blockIdx.x*blockDim.x >=  r )		&& (blockIdx.y*blockDim.y >=  r) &&
 		(((blockIdx.x+1)*blockDim.x +r) < w)	&& (((blockIdx.y+1)*blockDim.y +r) < h)){	
@@ -211,7 +216,7 @@ __global__ void blurr_GPU(float * d_imageArray,float * d_imageArrayResult, float
 	
 	/*
 	* All the subblocks are now in shared memory. Now we blurr the image.
-	*
+	*/
 
 	
 	for( i = 0; i <= r; i++){
@@ -252,12 +257,11 @@ __global__ void blurr_GPU(float * d_imageArray,float * d_imageArrayResult, float
 	
 	//store the blurrred image.
 	idx = ((y * w) + x)*3;
-	d_imageArrayResult[idx++] = tempR;
-	d_imageArrayResult[idx++] = tempG;
-	d_imageArrayResult[idx++] = tempB;
-	
+	d_imageArrayResult[idx++] = tempB/255.0;
+	d_imageArrayResult[idx++] = tempG/255.0;
+	d_imageArrayResult[idx++] = tempR/255.0;	
 }
-*/
+
 //Find the 3d image gradients from a stack of Difference of gaussians. 
 Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hwGrad, int hwFeat, vector<KeyPoint> &kp){
 	
@@ -550,6 +554,7 @@ int main()
 	
 	if(!image1.data || !image2.data){
 		cerr << "Could not open or find the image" << endl;
+		exit(0);
 	}
 	
 	cudaDeviceProp dev_prop_curr;
@@ -565,15 +570,16 @@ int main()
 	*/
 	
 	//
-    // process it on the GPU: 1) copy it to device memory, 2) process
-    // it with a 2d grid of 2d blocks, with each thread assigned to a 
-    // pixel. then 3) copy it back.
+    // process it on the GPU: 
+    //	1) copy it to device memory, 
+    //	2) process it with a 2d grid of 2d blocks, with each thread assigned to a pixel. 
+    //	3) copy it back.
     // 
-    float * d_test;
     float BLOCK_X = 16.0;
 	float BLOCK_Y = 16.0;
 	
-	//For High end GPUs.
+	
+	//For High end GPUs. Use more threads.
 	if( dev_prop_curr.maxThreadsPerBlock >= 1024 ){ 
 		BLOCK_X = 32.0;	
 		BLOCK_Y = 32.0;
@@ -584,6 +590,8 @@ int main()
     unsigned char * d_imageArray1;
     unsigned char * d_imageArray2;
     
+    //Allocate space on the GPU memory for gray scale convesion. THis images will serve
+    //as source operands in the subsquent kernels.
     GPU_CHECKERROR( cudaMalloc((void **)&d_imageArray1, sizeof(unsigned char)*w*h*3) );
     GPU_CHECKERROR( cudaMalloc((void **)&d_imageArray2, sizeof(unsigned char)*w*h*3) );
 			
@@ -598,7 +606,7 @@ int main()
 								cudaMemcpyHostToDevice ) );	
 													
 	//
-	// Your memory copy, & kernel launch code goes here:
+	// GPU conversion to gray scale.
 	//
 	printf("Launching gray scale kernel\n");
 	toGray_GPU<<< numBlocks, numThreads>>>( d_imageArray1,w,h);
@@ -619,7 +627,8 @@ int main()
 								d_imageArray2, 
 								sizeof(unsigned char)*w*h*3, 
 								cudaMemcpyDeviceToHost ) );
-								
+		
+						
 	namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
 	namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
 	//resizeWindow(img1.c_str(),800,600);
@@ -627,20 +636,30 @@ int main()
 	imshow(img1.c_str(),image1);
 	imshow(img2.c_str(),image2);
 	
+	
 	waitKey(0);
-	
-	return 0;
-	
-	/*
 	
 	int octaves = OCTAVES;
 	int scales = SCALES;
 	
 	float sf = 1.0f/scales;
 	
-	Mat imageStack_1[octaves][scales];
-	Mat imageStack_2[octaves][scales];
+	//Mat imageStack_1[octaves][scales];
+	//Mat imageStack_2[octaves][scales];
 	
+	float * d_imageStack1;
+	float * d_imageStack2;
+
+	//Allocate space on the GPU memory for Gaussian blurr with different Kernel sizes.
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack1, sizeof(float)*w*h*3*octaves*scales) );
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack2, sizeof(float)*w*h*3*octaves*scales) );
+ 
+	//Assumes all the images have the same dimensions.
+	int rows = image1.rows;
+	int cols = image1.cols;
+	int step = image1.step;
+	int chan = image1.channels();	
+    
 	for( int o = 0; o < octaves ; o++ ){
 	
 		int s = 0;
@@ -648,13 +667,24 @@ int main()
 	
 			//Creates a gaussian kernel (normalized 2d distribution).
 			float m = o+1;
-			int	hw = 2*m;
+			int	hw = 2*m+s;
 			int	w = 2*hw+1;
-			float sigma = pow(2,o)*k;
+			float sigma = pow(2,m)*k;
 			cout << "sigma " << sigma << endl;
-			float gaussKernel[w][w];
+			float h_Gaussian[w][w];
 			float total = 0.0;
 			
+			if( (D_MAX*D_MAX) < w*w ){
+				cerr << "Exceded size of constant memory for gaussian blurr kernel." << endl;
+				exit(0);
+			}
+			
+			size_t sharedBlockSZ = 3*(BLOCK_X+2*hw) * (BLOCK_Y+2*hw) * sizeof(float);	//Picture blocks
+			if(sharedBlockSZ > dev_prop_curr.sharedMemPerBlock){
+				printf("Shared Memory exceeded allocated size per block: %lu Max %lu\n",sharedBlockSZ, dev_prop_curr.sharedMemPerBlock);
+				return -1;
+			}
+		
 	
 			//Gaussian Kernel
 			for(int i = -hw; i <= hw ;i++){
@@ -662,7 +692,7 @@ int main()
 		
 					float g = exp( -(i*i + j*j)/(2*sigma*sigma) );
 			
-					gaussKernel[i+hw][j+hw] = g;
+					h_Gaussian[i+hw][j+hw] = g;
 					total += g;
 				}
 			}
@@ -670,17 +700,69 @@ int main()
 			for(int i = -hw; i <= hw ;i++){
 				for(int j = -hw; j <= hw ;j++){
 		
-					gaussKernel[i+hw][j+hw] /= total;
+					h_Gaussian[i+hw][j+hw] /= total;
+					if(i==0){
+						h_Gaussian[i+hw][j+hw]/=2.0;
+					}
+					if(j==0){
+						h_Gaussian[i+hw][j+hw]/=2.0;
+					}
 				}
 			}
-	
-			imageStack_1[o][s] = GaussianBlurr(gray_image1,&gaussKernel[0][0],hw);
-			imageStack_2[o][s] = GaussianBlurr(gray_image2,&gaussKernel[0][0],hw);
 			
-			cout << "image blurr done (" << o << "," << s << ")" << endl;
+			//Copy the gaussian Kernel to constant memory.
+			GPU_CHECKERROR( cudaMemcpyToSymbol( 
+    							d_const_Gaussian, 
+    							&h_Gaussian[0][0], 
+    							sizeof(float)*w*w,
+    							0,
+    							cudaMemcpyHostToDevice));
+    							
+			//imageStack_1[o][s] = GaussianBlurr(gray_image1,&gaussKernel[0][0],hw);
+			//imageStack_2[o][s] = GaussianBlurr(gray_image2,&gaussKernel[0][0],hw);
+			
+			int stackIdx =(o*scales + s)*rows*cols*chan;
+			GaussianBlurr_GPU<<< numBlocks, numThreads , sharedBlockSZ>>>(d_imageArray1,&d_imageStack1[stackIdx],cols,rows,hw);
+			GaussianBlurr_GPU<<< numBlocks, numThreads , sharedBlockSZ>>>(d_imageArray2,&d_imageStack2[stackIdx],cols,rows,hw);
+			
+			cout << "image blurr done (" << o << "," << s << ")" << endl;			
+
+			
+			//cout << cols << "*" << rows << " | " << step << "_" << chan <<  endl;
+	
+			Mat newImg1( rows, cols, CV_32FC3);
+			float * newPtr1 = (float *)newImg1.data;
+			Mat newImg2( rows, cols, CV_32FC3);
+			float * newPtr2 = (float *)newImg2.data;
+			
+			GPU_CHECKERROR( cudaMemcpy( newPtr1, 
+										&d_imageStack1[stackIdx], 
+										sizeof(float)*rows*cols*chan, 
+										cudaMemcpyDeviceToHost ) );
+								
+			GPU_CHECKERROR( cudaMemcpy( newPtr2, 
+										&d_imageStack2[stackIdx], 
+										sizeof(float)*rows*cols*chan, 
+										cudaMemcpyDeviceToHost ) );
+			
+			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
+			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
+			//resizeWindow(img1.c_str(),800,600);
+			//resizeWindow(img2.c_str(),800,600);
+			imshow(img1.c_str(),newImg1);
+			imshow(img2.c_str(),newImg2);
+	
+			waitKey(0);
+	
 		}
 	}
 	
+	GPU_CHECKERROR( cudaFree(d_imageArray1) );
+	GPU_CHECKERROR( cudaFree(d_imageArray2) );
+    GPU_CHECKERROR( cudaFree(d_imageStack1));
+	GPU_CHECKERROR( cudaFree(d_imageStack2) );
+	
+	/*
 	//Scale-space extrema detection.
 	//DoG (difference of gaussian images).
 	Mat diff_imgs_1[octaves][scales-1];
@@ -837,8 +919,7 @@ int main()
 	namedWindow("Result",CV_WINDOW_NORMAL);
 	resizeWindow("Result",900,400);
 	imshow("Result", result );
-	
+	*/
 	waitKey(0);
     return 0;
-    */
 }
