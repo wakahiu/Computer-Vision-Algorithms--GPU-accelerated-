@@ -133,9 +133,9 @@ __global__ void imageDiff_GPU(float * d_image1, float * d_image2,float * diff_im
 	//store the blurrred image.
 	unsigned int idx = ((y * w) + x)*3;
 	
-	diff_img[idx+0] = abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
-	diff_img[idx+1] = abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
-	diff_img[idx+2] = abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
+	diff_img[idx+0] = 20*abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
+	diff_img[idx+1] = 20*abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
+	diff_img[idx+2] = 20*abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
 }
 
 //Find the difference in image instensity 
@@ -1113,6 +1113,14 @@ int main()
 										cudaMemcpyDeviceToHost ) );
 			
 			
+			char buffer1[50];
+			char buffer2[50];
+			sprintf(buffer1,"DoGImage1_%d_%d.jpg",o,s);
+			sprintf(buffer2,"DoGImage2_%d_%d.jpg",o,s);
+			imwrite( buffer1,newImg1);
+			imwrite( buffer2,newImg2);
+			
+			/*
 			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
 			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
 			//resizeWindow(img1.c_str(),800,600);
@@ -1120,7 +1128,7 @@ int main()
 			imshow(img1.c_str(),newImg1);
 			imshow(img2.c_str(),newImg2);
 	
-			waitKey(0);	
+			waitKey(0);	*/
 		}
 
 	}
