@@ -1,7 +1,7 @@
 #include "commonHeaders.h"
 
-#define OCTAVES 2
-#define SCALES 5
+#define OCTAVES 5
+#define SCALES 3
 
 //Constant buffer for the gaussian kernel
 #define D_MAX 50		//10000Bytes < 64KB
@@ -121,8 +121,25 @@ void plot(Mat img,int x,int y,int b, int g, int r){
 	
 }
 
+__global__ void imageDiff_GPU(float * d_image1, float * d_image2,float * diff_img,int w,int h, float s){
+	
+	int x = blockDim.x*blockIdx.x + threadIdx.x; 
+	int y = blockDim.y*blockIdx.y + threadIdx.y;
+
+	if(x >= w || y >= h)
+		return;
+
+	
+	//store the blurrred image.
+	unsigned int idx = ((y * w) + x)*3;
+	
+	diff_img[idx+0] = abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
+	diff_img[idx+1] = abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
+	diff_img[idx+2] = abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
+}
+
 //Find the difference in image instensity 
-Mat findImageDiff(Mat image1, Mat image2, float s){
+Mat imageDiff(Mat image1, Mat image2, float s){
 
 	//Consider using integers/floats instead of unsigned Uint_8
 	Mat imgDiff( image1.rows, image1.cols,CV_32FC3);
@@ -148,7 +165,6 @@ Mat findImageDiff(Mat image1, Mat image2, float s){
 	}
 	return imgDiff;
 }
-
 //
 // Gaussian Image blurr. Uses shared memory for speed up.
 //
@@ -257,9 +273,9 @@ __global__ void GaussianBlurr_GPU(unsigned char * d_imageArray,float * d_imageAr
 	
 	//store the blurrred image.
 	idx = ((y * w) + x)*3;
-	d_imageArrayResult[idx++] = tempB/255.0;
-	d_imageArrayResult[idx++] = tempG/255.0;
-	d_imageArrayResult[idx++] = tempR/255.0;	
+	d_imageArrayResult[idx++] = tempB;
+	d_imageArrayResult[idx++] = tempG;
+	d_imageArrayResult[idx++] = tempR;	
 }
 
 //Find the 3d image gradients from a stack of Difference of gaussians. 
@@ -541,6 +557,278 @@ Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float t
 	return newImg;
 	
 }
+
+//
+// Gaussian Image blurr. Uses shared memory for speed up.
+//
+__global__ void detectKeyPoints_GPU(float * d_imagePrev,float * d_imageCurr,float * d_imageNext, float * d_keyPoints, int w,int h, int r){
+	
+	extern __shared__ float  picBlock[];
+	
+	int i = blockDim.x*blockIdx.x + threadIdx.x; 
+	int j = blockDim.y*blockIdx.y + threadIdx.y;
+
+	if(i >= w || j >= h)
+		return;
+	
+	int d = 2*r + 1;
+	unsigned int idxN, idxS, idxW, idxE;
+	float tempR = 0.0;
+    float tempG = 0.0;
+    float tempB = 0.0;
+	float Gaus_val = 0.0;
+	int	shDim_x = (blockDim.x + 2*r);
+	int offset = (blockDim.x + 2*r)*(blockDim.y + 2*r);
+	int x, y;
+	int xSh, ySh;
+	
+	//Copy the image into shared memory
+	//Blocks that do not require boundry check
+	if( (blockIdx.x*blockDim.x >=  r )		&& (blockIdx.y*blockDim.y >=  r) &&
+		(((blockIdx.x+1)*blockDim.x +r) < w)	&& (((blockIdx.y+1)*blockDim.y +r) < h)){	
+		
+		//Collaborative loading into shared memory
+		for( y = j-r, ySh = threadIdx.y ; y< (blockDim.y*(blockIdx.y + 1) + r)  ; y+=blockDim.y , ySh+=blockDim.y ){
+			for( x = i-r, xSh = threadIdx.x ; x < (blockDim.x*(blockIdx.x + 1) + r)  ; x+=blockDim.x , xSh+=blockDim.x){
+				picBlock[(ySh*shDim_x+xSh)] = d_imageCurr[(y*w+x)*3];
+				picBlock[(ySh*shDim_x+xSh)+offset] = d_imageCurr[(y*w+x)*3+1];
+				picBlock[(ySh*shDim_x+xSh)+offset*2] = d_imageCurr[(y*w+x)*3+2];
+			}
+		}
+	}
+	/*
+	//These blocks may access picture elements that are out of bounds
+	else{
+		int xLim = blockDim.x*(blockIdx.x + 1) > w ? w : (blockDim.x*(blockIdx.x + 1) + r) ;
+		int yLim = blockDim.y*(blockIdx.y + 1) > h ? h : (blockDim.y*(blockIdx.y + 1) + r);
+		int xStep = blockDim.x*(blockIdx.x + 1) > w ? w%blockDim.x : blockDim.x ;
+		int yStep = blockDim.y*(blockIdx.y + 1) > h ? h%blockDim.y : blockDim.y ;
+		
+		//Collaborative loading into shared memory
+		for( y = j-r, ySh = threadIdx.y ; y < yLim ; ySh+=yStep , y +=yStep ){
+			for( x = i-r, xSh = threadIdx.x ; x < xLim ; xSh+=xStep , x +=xStep){
+				
+				idxN = y<0? 0 : (y>=h ? h-1 : y );
+				idxS = x<0? 0 : (x>=w ? w-1 : x );
+	
+				picBlock[(ySh*shDim_x+xSh)] = d_imageCurr[(idxN*w+idxS)*3];
+				picBlock[(ySh*shDim_x+xSh)+offset] = d_imageCurr[(idxN*w+idxS)*3+1];
+				picBlock[(ySh*shDim_x+xSh)+offset*2] = d_imageCurr[(idxN*w+idxS)*3+2];			
+			}
+		}
+		
+	}
+	__syncthreads();		//Make sure every thread has loaded all its portions.
+	
+	int idx = w*j*3+i;
+	//Ignore edge pixels.
+	if( j < r || i < r || j >= h -r || i >= (w - r)){
+		d_keyPoints[idx+0] = 0;
+		d_keyPoints[idx+1] = 0;
+		d_keyPoints[idx+2] = 0;
+		return;
+	}
+	/*
+	float dx = 0.0;
+	float dy = 0.0;
+	int patchCount = 0;
+	
+	//Calculate the gradient by considering neighbouring pixels.
+	for(int y = j-r; y <= j+r; y++){
+		for(int x = i-r*3; x <= i+r*3 ;x+=3){
+		
+			int kernIdx = shDim_x*y + x;
+			dx += picBlock[kernIdx+3] - 		picBlock[kernIdx];
+			dy += picBlock[kernIdx+shDim_x] - 	picBlock[kernIdx];
+			patchCount++;
+		}
+	}
+	//Average the gradients.
+	dx /= patchCount;
+	dy /= patchCount;
+	
+	//Gradient and magnitude.
+	d_keyPoints[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
+	d_keyPoints[idx+2] = atan2(dy,dx);				//Orientation of gradient
+	float D = currPtr[idx];
+	
+	//Early termination. These points are unlikely to be keypoints
+	//Anyway.
+	if(D < threshold ){
+		d_keyPoints[idx+0] = 0.0;			
+		return;
+	}
+	
+	/*
+	* All the subblocks are now in shared memory. Now we blurr the image.
+	*
+
+	
+	//Key point localization.
+	//Eliminate points along the edges.
+	float a = dx*dx;
+	float b = 2*dx*dy;
+	float c = dy*dy;
+	
+	float elipDet = (b*b+(a-c)*(a-c));
+
+	float l1 = 0.5*(a+c+sqrt(elipDet));
+	float l2 = 0.5*(a+c-sqrt(elipDet));
+	
+	float R = (l1*l2 - 1e-8*(l1+l2)*(l1+l2));
+	
+	if( R < 0 ){
+			//Eliminate points along edges							
+			d_keyPoints[idx+0] = 0;
+			return;
+	}
+	
+	//First Derivative.
+	float ds_f =  d_imageNext[idx] -  d_imageCurr[idx];	//Forwards
+	float ds_b =  d_imageCurr[idx] -  d_imagePrev[idx];	//Backwards
+	
+	//Average them.
+	float ds = (ds_f + ds_b)/2;
+	float dxVec[3] = {-dx,-dy,-ds};
+
+	//Second Derivatives
+	float ddx = dx - dx_prev;
+	float ddy = dy - dy_prev;
+	float dds = ds_f - ds_b;
+	
+	dx_prev = dx;
+	dy_prev = dy;
+	
+	//Second derivative matrix
+
+	float DDMat[3][3] ={{ddx,	dx*dy,	dx*ds},
+						{dy*dx,	ddy,	dy*ds},
+						{ds*dx,	ds*dy,	dds}};
+
+	//Now get its inverse.
+	float det =(DDMat[0][0]*DDMat[1][1]*DDMat[2][2] +
+				DDMat[0][1]*DDMat[1][2]*DDMat[2][0] +
+				DDMat[0][2]*DDMat[1][0]*DDMat[2][1]	) 
+				-
+			   (DDMat[0][2]*DDMat[1][1]*DDMat[2][0] +
+				DDMat[0][1]*DDMat[1][0]*DDMat[2][2] +
+				DDMat[0][0]*DDMat[1][2]*DDMat[2][1]	);
+
+	
+	if(det != 0){
+		
+		//Adjugate matrix. Matrix of coffactors.
+		float CC_00 = DDMat[1][1]*DDMat[2][2] - DDMat[1][2]*DDMat[2][1];
+		float CC_01 = DDMat[0][2]*DDMat[2][1] - DDMat[0][1]*DDMat[2][2];
+		float CC_02 = DDMat[0][1]*DDMat[1][2] - DDMat[0][2]*DDMat[1][1];
+
+		float CC_10 = DDMat[1][2]*DDMat[2][0] - DDMat[1][0]*DDMat[2][2];
+		float CC_11 = DDMat[0][0]*DDMat[2][2] - DDMat[0][2]*DDMat[2][0];
+		float CC_12 = DDMat[0][2]*DDMat[1][0] - DDMat[0][0]*DDMat[1][2];
+
+		float CC_20 = DDMat[1][0]*DDMat[2][1] - DDMat[1][1]*DDMat[2][0];
+		float CC_21 = DDMat[0][1]*DDMat[2][0] - DDMat[0][0]*DDMat[2][1];
+		float CC_22 = DDMat[0][0]*DDMat[1][1] - DDMat[0][1]*DDMat[1][0];
+	
+		float CCMat[3][3] ={{CC_00,	CC_01,	CC_02},
+							{CC_10,	CC_11,	CC_12},
+							{CC_20,	CC_21,	CC_22}};
+	
+		//Inverse matrix.
+		CCMat[0][0] /= det;	CCMat[0][1] /= det;	CCMat[0][2] /= det;
+		CCMat[1][0] /= det;	CCMat[1][1] /= det;	CCMat[1][2] /= det;
+		CCMat[2][0] /= det;	CCMat[2][1] /= det;	CCMat[2][2] /= det;
+
+		//Aproximation factors
+		float XBarVec[3]=	{CCMat[0][0]*dxVec[0]+CCMat[0][1]*dxVec[1]+CCMat[0][2]*dxVec[2],
+							CCMat[1][0]*dxVec[0]+CCMat[1][1]*dxVec[1]+CCMat[1][2]*dxVec[2],
+							CCMat[2][0]*dxVec[0]+CCMat[2][1]*dxVec[1]+CCMat[2][2]*dxVec[2] };
+		
+		//Remove low contrast extrema.
+		float xbarThr = 0.5;
+		if( ( abs( XBarVec[0] ) > xbarThr || abs( XBarVec[1] ) > xbarThr || abs( XBarVec[2] ) > xbarThr ) ){
+			d_keyPoints[idx+0] = 0;
+			return;
+		}else{
+			D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0;	
+		}
+	}	
+	
+	d_keyPoints[idx+0] = D;
+	*/
+}
+
+//Find the 3d image gradients from a stack of Difference of gaussians. 
+Mat imageGradient_GPU(	float * d_imageStack, Mat plotImg, int octaves, int scales, float threshold , 
+						int hwGrad, int hwFeat, vector<KeyPoint> &kp,dim3 numBlocks,dim3 numThreads){
+	
+	float count = 0.0;
+	
+	cudaDeviceProp dev_prop_curr;
+	cudaGetDeviceProperties( &dev_prop_curr , 0);
+	size_t sharedBlockSZ = 3*(numBlocks.x+2*hwGrad) * (numBlocks.y+2*hwGrad) * sizeof(float);	//Picture blocks
+	if(sharedBlockSZ > dev_prop_curr.sharedMemPerBlock){
+		printf("Shared Memory exceeded allocated size per block: %lu Max %lu\n",sharedBlockSZ, dev_prop_curr.sharedMemPerBlock);
+		exit(0);
+	}
+		
+		
+	//Assumes all the images have the same dimensions.
+	int rows = plotImg.rows;
+	int cols = plotImg.cols;
+	int step = plotImg.step;
+	int chan = plotImg.channels();
+	
+	Mat newImg( rows, cols, CV_32FC3);
+	float * newPtr = (float *)newImg.data;
+	
+	Mat 	dataMat( rows, cols, CV_32FC4 );
+	float *	dataMatPtr = (float *)dataMat.data;
+	int 	dataMatStep = dataMat.step;		//<< TODO
+			
+			
+	//Assumes sigma increases as the scale and octave increases.
+	
+	//Loops within loops within loops ad infinitum...
+	//We cycle over all the images on the stack [octaves x scales] and all the
+	//pixels in an image then consider all the neighbouring pixels.
+	for(int o = 1; o < (octaves-1) ; o++ ){
+		for(int s = 0 ; s < scales ; s++ ){
+		
+			
+			//float sigmaScale = pow(2,o)*((float)s/SCALES+1 + 0.5/SCALES); 
+			//cout << sigmaScale << endl;
+			
+			
+			int ns = s;
+			int ps = s;
+			int no = (o+1)%octaves;
+			int po = (o+octaves-1)%octaves;
+			
+			cout << "s " << s << " ns " << ns << " ps " << ps << endl;
+			cout << "o " << o << " no " << no << " po " << po << endl << endl;
+			
+			int prevIdx = (po*scales + ps)*rows*cols*chan;
+			int	currIdx = (o*scales + s)*rows*cols*chan;
+			int nextIdx = (no*scales + ns)*rows*cols*chan;
+			
+			float * d_keyPoints;
+			GPU_CHECKERROR( cudaMalloc((void **)&d_keyPoints, sizeof(float)*rows*cols*chan) );
+	
+			detectKeyPoints_GPU<<< numBlocks, numThreads , sharedBlockSZ >>>
+				(&d_imageStack[prevIdx],&d_imageStack[currIdx],&d_imageStack[nextIdx],d_keyPoints, cols, rows,hwGrad);
+			
+			GPU_CHECKERROR( cudaGetLastError() );
+			GPU_CHECKERROR( cudaDeviceSynchronize() );
+			
+		}
+	}
+	
+	cout << "count " << count << endl;
+	return newImg;
+	
+}
+
 	
 int main()
 {
@@ -575,14 +863,14 @@ int main()
     //	2) process it with a 2d grid of 2d blocks, with each thread assigned to a pixel. 
     //	3) copy it back.
     // 
-    float BLOCK_X = 16.0;
-	float BLOCK_Y = 16.0;
+    float BLOCK_X = 16.0f;
+	float BLOCK_Y = 16.0f;
 	
 	
 	//For High end GPUs. Use more threads.
 	if( dev_prop_curr.maxThreadsPerBlock >= 1024 ){ 
-		BLOCK_X = 32.0;	
-		BLOCK_Y = 32.0;
+		BLOCK_X = 32.0f;	
+		BLOCK_Y = 32.0f;
 	}
 
 	dim3 numThreads( BLOCK_X, BLOCK_Y,1);
@@ -636,12 +924,20 @@ int main()
 	imshow(img1.c_str(),image1);
 	imshow(img2.c_str(),image2);
 	
+	imwrite("grayImage1.jpg",image1);
+	imwrite("grayImage2.jpg",image2);
+	
 	
 	waitKey(0);
 	
 	int octaves = OCTAVES;
 	int scales = SCALES;
-	
+	//Assumes all the images have the same dimensions.
+	int rows = image1.rows;
+	int cols = image1.cols;
+	int step = image1.step;
+	int chan = image1.channels();	
+		
 	float sf = 1.0f/scales;
 	
 	//Mat imageStack_1[octaves][scales];
@@ -651,28 +947,25 @@ int main()
 	float * d_imageStack2;
 
 	//Allocate space on the GPU memory for Gaussian blurr with different Kernel sizes.
-    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack1, sizeof(float)*w*h*3*octaves*scales) );
-    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack2, sizeof(float)*w*h*3*octaves*scales) );
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack1, sizeof(float)*rows*cols*chan*octaves*scales) );
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack2, sizeof(float)*rows*cols*chan*octaves*scales) );
  
-	//Assumes all the images have the same dimensions.
-	int rows = image1.rows;
-	int cols = image1.cols;
-	int step = image1.step;
-	int chan = image1.channels();	
+ 	cout << sizeof(float)*rows*cols*chan*octaves*scales << endl;
+
     
 	for( int o = 0; o < octaves ; o++ ){
 	
 		int s = 0;
-		for(float k = 1.0; k < 2.0; k += sf, s++){
+		for(float k = 1.0f; k < 2.0f; k += sf, s++){
 	
 			//Creates a gaussian kernel (normalized 2d distribution).
 			float m = o+1;
 			int	hw = 2*m+s;
 			int	w = 2*hw+1;
-			float sigma = pow(2,m)*k;
+			float sigma = pow(2,o)*k;
 			cout << "sigma " << sigma << endl;
 			float h_Gaussian[w][w];
-			float total = 0.0;
+			float total = 0.0f;
 			
 			if( (D_MAX*D_MAX) < w*w ){
 				cerr << "Exceded size of constant memory for gaussian blurr kernel." << endl;
@@ -702,10 +995,10 @@ int main()
 		
 					h_Gaussian[i+hw][j+hw] /= total;
 					if(i==0){
-						h_Gaussian[i+hw][j+hw]/=2.0;
+						h_Gaussian[i+hw][j+hw]/=2.0f;
 					}
 					if(j==0){
-						h_Gaussian[i+hw][j+hw]/=2.0;
+						h_Gaussian[i+hw][j+hw]/=2.0f;
 					}
 				}
 			}
@@ -724,7 +1017,6 @@ int main()
 			int stackIdx =(o*scales + s)*rows*cols*chan;
 			GaussianBlurr_GPU<<< numBlocks, numThreads , sharedBlockSZ>>>(d_imageArray1,&d_imageStack1[stackIdx],cols,rows,hw);
 			GaussianBlurr_GPU<<< numBlocks, numThreads , sharedBlockSZ>>>(d_imageArray2,&d_imageStack2[stackIdx],cols,rows,hw);
-			
 			cout << "image blurr done (" << o << "," << s << ")" << endl;			
 
 			
@@ -744,7 +1036,14 @@ int main()
 										&d_imageStack2[stackIdx], 
 										sizeof(float)*rows*cols*chan, 
 										cudaMemcpyDeviceToHost ) );
-			
+			char buffer1[50];
+			char buffer2[50];
+			sprintf(buffer1,"grayImage1_%d_%d.jpg",o,s);
+			sprintf(buffer2,"grayImage2_%d_%d.jpg",o,s);
+			imwrite( buffer1,image1);
+			imwrite( buffer2,image2);
+	
+			/*
 			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
 			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
 			//resizeWindow(img1.c_str(),800,600);
@@ -753,52 +1052,109 @@ int main()
 			imshow(img2.c_str(),newImg2);
 	
 			waitKey(0);
+			*/
+			
 	
 		}
 	}
 	
+	GPU_CHECKERROR( cudaGetLastError() );
+	GPU_CHECKERROR( cudaDeviceSynchronize() );
+    		
 	GPU_CHECKERROR( cudaFree(d_imageArray1) );
 	GPU_CHECKERROR( cudaFree(d_imageArray2) );
-    GPU_CHECKERROR( cudaFree(d_imageStack1));
-	GPU_CHECKERROR( cudaFree(d_imageStack2) );
-	
 	
 	//Scale-space extrema detection.
 	//DoG (difference of gaussian images).
-	Mat diff_imgs_1[octaves][scales-1];
-	Mat diff_imgs_2[octaves][scales-1];
+	//Mat diff_imgs_1[octaves][scales-1];
+	//Mat diff_imgs_2[octaves][scales-1];
+	
+	float * d_diffImg1;
+	float * d_diffImg2;
+
+	//Allocate space on the GPU memory for Gaussian blurr with different Kernel sizes.
+    GPU_CHECKERROR( cudaMalloc((void **)&d_diffImg1, sizeof(float)*rows*cols*chan*octaves*(scales-1)) );
+    GPU_CHECKERROR( cudaMalloc((void **)&d_diffImg2, sizeof(float)*rows*cols*chan*octaves*(scales-1)) );
+    
+	
 	for(int o=0 ; o < octaves ; o++ ){
 	
 		int s = 1;
-		for( float k = 1.0 + sf; s < scales; k+=sf, s++){
+		for( float k = 1.0f + sf; s < scales; k+=sf, s++){
 			float diff = k/(k-sf);
-			diff_imgs_1[o][s-1]  = findImageDiff(imageStack_1[o][s-1],imageStack_1[o][s],diff);
-			diff_imgs_2[o][s-1]  = findImageDiff(imageStack_2[o][s-1],imageStack_2[o][s],diff);
+			
+			unsigned int prevIdx =(o*scales + s-1)*rows*cols*chan;
+			unsigned int nextIdx =(o*scales + s)*rows*cols*chan;
+			unsigned int currIdx =(o*(scales-1) + s-1)*rows*cols*chan;
+			imageDiff_GPU<<< numBlocks, numThreads>>>(&d_imageStack1[prevIdx],&d_imageStack1[nextIdx], &d_diffImg1[currIdx], cols,rows,diff);
+			GPU_CHECKERROR( cudaGetLastError() );
+			GPU_CHECKERROR( cudaDeviceSynchronize() );
+			imageDiff_GPU<<< numBlocks, numThreads>>>(&d_imageStack2[prevIdx],&d_imageStack2[nextIdx], &d_diffImg2[currIdx], cols,rows,diff);
+			GPU_CHECKERROR( cudaGetLastError() );
+			GPU_CHECKERROR( cudaDeviceSynchronize() );
+			//diff_imgs_1[o][s-1]  = imageDiff(imageStack_1[o][s-1],imageStack_1[o][s],diff);
+			//diff_imgs_2[o][s-1]  = imageDiff(imageStack_2[o][s-1],imageStack_2[o][s],diff);
 			cout << "Diff done (" << o << "," << s -1 << ")" << endl;
+	
+			Mat newImg1( rows, cols, CV_32FC3);
+			float * newPtr1 = (float *)newImg1.data;
+			Mat newImg2( rows, cols, CV_32FC3);
+			float * newPtr2 = (float *)newImg2.data;
+			
+			cout << prevIdx << endl;
+			GPU_CHECKERROR( cudaMemcpy( newPtr1, 
+										&d_diffImg1[currIdx], 
+										sizeof(float)*rows*cols*chan, 
+										cudaMemcpyDeviceToHost ) );
+								
+			GPU_CHECKERROR( cudaMemcpy( newPtr2, 
+										&d_diffImg2[currIdx], 
+										sizeof(float)*rows*cols*chan, 
+										cudaMemcpyDeviceToHost ) );
+			
+			
+			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
+			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
+			//resizeWindow(img1.c_str(),800,600);
+			//resizeWindow(img2.c_str(),800,600);
+			imshow(img1.c_str(),newImg1);
+			imshow(img2.c_str(),newImg2);
+	
+			waitKey(0);	
 		}
 
 	}
+	
+	GPU_CHECKERROR( cudaFree(d_imageStack1));
+	GPU_CHECKERROR( cudaFree(d_imageStack2));
+	
 	
 	vector<KeyPoint> keyPoints1;
 	vector<KeyPoint> keyPoints2;
 	
 	
 	//float threshold =0.9979;
-	float threshold = 1;
+	float threshold = 0.90;
 	int hwGrad = 4;
 	int hwFeat = 8;
 	//Keypoint localization. Now we have keypoints, we would like to filter out
 	//unstable key points and edges.
-	Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints1);
-	Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints2);
+	//Mat img1Result = imageGradient(&diff_imgs_1[0][0], image1, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints1);
+	//Mat img2Result = imageGradient(&diff_imgs_2[0][0], image2, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints2);
 	
+	
+	Mat img1Result = imageGradient_GPU(&d_diffImg1[0], image1, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints1, numBlocks, numThreads);
+	Mat img2Result = imageGradient_GPU(&d_diffImg2[0], image2, octaves, scales-1,threshold, hwGrad, hwFeat,keyPoints1, numBlocks, numThreads);
+
+	GPU_CHECKERROR( cudaFree(d_diffImg1));
+	GPU_CHECKERROR( cudaFree(d_diffImg2));
 	
 	namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
 	namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
 	//resizeWindow(img1.c_str(),800,600);
 	//resizeWindow(img2.c_str(),800,600);
-	imshow(img1.c_str(),image1);
-	imshow(img2.c_str(),image2);
+	imshow(img1.c_str(),img1Result);
+	imshow(img2.c_str(),img1Result);
 	
 
 	
@@ -820,11 +1176,6 @@ int main()
 	
 	Vector<KeyPoint> keypts1;
 	Vector<KeyPoint> keypts2;
-	
-	int i = 0;
-	for( vector<KeyPoint>::iterator kpIter = keyPoints1.begin(); i < 5 && kpIter != keyPoints1.end() ; ++i, ++kpIter ){
-		cout << "Here " << endl;
-	} 
 	
 	Mat kp1;
 	Mat kp2;
