@@ -889,7 +889,7 @@ int main()
 								cudaMemcpyHostToDevice ) );	
 	
 	GPU_CHECKERROR( cudaMemcpy(	d_imageArray2, 
-								image1.data, 
+								image2.data, 
 								sizeof(unsigned char)*w*h*3, 
 								cudaMemcpyHostToDevice ) );	
 													
@@ -1040,8 +1040,8 @@ int main()
 			char buffer2[50];
 			sprintf(buffer1,"blurrImage1_%d_%d.jpg",o,s);
 			sprintf(buffer2,"blurrImage2_%d_%d.jpg",o,s);
-			imwrite( buffer1,image1);
-			imwrite( buffer2,image2);
+			imwrite( buffer1,newImg1);
+			imwrite( buffer2,newImg2);
 	
 			/*
 			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);

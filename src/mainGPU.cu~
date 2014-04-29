@@ -1038,10 +1038,10 @@ int main()
 										cudaMemcpyDeviceToHost ) );
 			char buffer1[50];
 			char buffer2[50];
-			sprintf(buffer1,"grayImage1_%d_%d.jpg",o,s);
-			sprintf(buffer2,"grayImage2_%d_%d.jpg",o,s);
-			imwrite( buffer1,image1);
-			imwrite( buffer2,image2);
+			sprintf(buffer1,"blurrImage1_%d_%d.jpg",o,s);
+			sprintf(buffer2,"blurrImage2_%d_%d.jpg",o,s);
+			imwrite( buffer1,newImg1);
+			imwrite( buffer2,newImg2);
 	
 			/*
 			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
