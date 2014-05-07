@@ -1,7 +1,7 @@
 #include "commonHeaders.h"
 
-#define OCTAVES 5
-#define SCALES 3
+#define OCTAVES 3
+#define SCALES 4
 
 //Constant buffer for the gaussian kernel
 #define D_MAX 50		//10000Bytes < 64KB
@@ -133,9 +133,9 @@ __global__ void imageDiff_GPU(float * d_image1, float * d_image2,float * diff_im
 	//store the blurrred image.
 	unsigned int idx = ((y * w) + x)*3;
 	
-	diff_img[idx+0] = 10*abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
-	diff_img[idx+1] = 10*abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
-	diff_img[idx+2] = 10*abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
+	diff_img[idx+0] = 20*abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
+	diff_img[idx+1] = 20*abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
+	diff_img[idx+2] = 20*abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
 }
 
 //Find the difference in image instensity 
@@ -832,8 +832,11 @@ Mat imageGradient_GPU(	float * d_imageStack, Mat plotImg, int octaves, int scale
 	
 int main()
 {
-	
 
+	bool show = false;	
+	/*
+	* Load images from file.
+	*/
 	String img1("panorama_image2.jpg");
 	String img2("panorama_image1.jpg");
 	
@@ -916,19 +919,19 @@ int main()
 								sizeof(unsigned char)*w*h*3, 
 								cudaMemcpyDeviceToHost ) );
 		
-						
-	namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
-	namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
-	//resizeWindow(img1.c_str(),800,600);
-	//resizeWindow(img2.c_str(),800,600);
-	imshow(img1.c_str(),image1);
-	imshow(img2.c_str(),image2);
+	if(show){
+		namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
+		namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
+		//resizeWindow(img1.c_str(),800,600);
+		//resizeWindow(img2.c_str(),800,600);
+		imshow(img1.c_str(),image1);
+		imshow(img2.c_str(),image2);
 	
-	imwrite("grayImage1.jpg",image1);
-	imwrite("grayImage2.jpg",image2);
-	
-	
-	waitKey(0);
+		imwrite("grayImage1.jpg",image1);
+		imwrite("grayImage2.jpg",image2);
+		
+		waitKey(0);
+	}
 	
 	int octaves = OCTAVES;
 	int scales = SCALES;
@@ -945,25 +948,30 @@ int main()
 	
 	float * d_imageStack1;
 	float * d_imageStack2;
+	size_t stackSize = sizeof(float)*rows*cols*chan*octaves*scales;
 
 	//Allocate space on the GPU memory for Gaussian blurr with different Kernel sizes.
-    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack1, sizeof(float)*rows*cols*chan*octaves*scales) );
-    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack2, sizeof(float)*rows*cols*chan*octaves*scales) );
- 
- 	cout << sizeof(float)*rows*cols*chan*octaves*scales << endl;
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack1, stackSize) );
+    GPU_CHECKERROR( cudaMalloc((void **)&d_imageStack2, stackSize) );
 
-    
+    /*
+    * Construct a scale-space. Blurr the images with Gaussian kernels of varrying sigma
+    * for DOG and to stimulate images of various sizes. Key point detection should 
+    * be invariant to scale.
+    */
 	for( int o = 0; o < octaves ; o++ ){
 	
 		int s = 0;
 		for(float k = 1.0f; k < 2.0f; k += sf, s++){
 	
-			//Creates a gaussian kernel (normalized 2d distribution).
+			/*
+			* Creates a gaussian kernel (normalized 2d distribution). 
+			*/
 			float m = o+1;
-			int	hw = 2*m+s;
+			int	hw = 2*m;
 			int	w = 2*hw+1;
-			float sigma = pow(2,o)*k;
-			cout << "sigma " << sigma << endl;
+			float sigma = 0.5*pow(2,o)*k;
+			cout << "sigma " << sigma << " Kernel Width = " << w << endl;
 			float h_Gaussian[w][w];
 			float total = 0.0f;
 			
@@ -1036,27 +1044,29 @@ int main()
 										&d_imageStack2[stackIdx], 
 										sizeof(float)*rows*cols*chan, 
 										cudaMemcpyDeviceToHost ) );
-			char buffer1[50];
-			char buffer2[50];
-			sprintf(buffer1,"blurrImage1_%d_%d.jpg",o,s);
-			sprintf(buffer2,"blurrImage2_%d_%d.jpg",o,s);
-			imwrite( buffer1,newImg1);
-			imwrite( buffer2,newImg2);
+			
+			if(show){
+				char buffer1[50];
+				char buffer2[50];
+				sprintf(buffer1,"blurrImage1_%d_%d.jpg",o,s);
+				sprintf(buffer2,"blurrImage2_%d_%d.jpg",o,s);
+				imwrite( buffer1,newImg1);
+				imwrite( buffer2,newImg2);
 	
-			/*
-			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
-			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
-			//resizeWindow(img1.c_str(),800,600);
-			//resizeWindow(img2.c_str(),800,600);
-			imshow(img1.c_str(),newImg1);
-			imshow(img2.c_str(),newImg2);
+				namedWindow(buffer1,CV_WINDOW_NORMAL);
+				namedWindow(buffer1,CV_WINDOW_NORMAL);
+				//resizeWindow(img1.c_str(),800,600);
+				//resizeWindow(img2.c_str(),800,600);
+				imshow(img1.c_str(),newImg1);
+				imshow(img2.c_str(),newImg2);
 	
-			waitKey(0);
-			*/
+				waitKey(0);
+			}
 			
 	
 		}
 	}
+	
 	
 	GPU_CHECKERROR( cudaGetLastError() );
 	GPU_CHECKERROR( cudaDeviceSynchronize() );
@@ -1064,14 +1074,18 @@ int main()
 	GPU_CHECKERROR( cudaFree(d_imageArray1) );
 	GPU_CHECKERROR( cudaFree(d_imageArray2) );
 	
-	//Scale-space extrema detection.
-	//DoG (difference of gaussian images).
+	/*
+	* Scale-space extrema detection.
+	* DoG (difference of gaussian images).
+	*/
+	
 	//Mat diff_imgs_1[octaves][scales-1];
 	//Mat diff_imgs_2[octaves][scales-1];
 	
 	float * d_diffImg1;
 	float * d_diffImg2;
 
+	stackSize = sizeof(float)*rows*cols*chan*octaves*(scales-1);
 	//Allocate space on the GPU memory for Gaussian blurr with different Kernel sizes.
     GPU_CHECKERROR( cudaMalloc((void **)&d_diffImg1, sizeof(float)*rows*cols*chan*octaves*(scales-1)) );
     GPU_CHECKERROR( cudaMalloc((void **)&d_diffImg2, sizeof(float)*rows*cols*chan*octaves*(scales-1)) );
@@ -1111,24 +1125,24 @@ int main()
 										&d_diffImg2[currIdx], 
 										sizeof(float)*rows*cols*chan, 
 										cudaMemcpyDeviceToHost ) );
+			show = true;
+			if(show){
+				char buffer1[50];
+				char buffer2[50];
+				sprintf(buffer1,"DoGImage1_%d_%d.jpg",o,s);
+				sprintf(buffer2,"DoGImage2_%d_%d.jpg",o,s);
+				imwrite( buffer1,newImg1);
+				imwrite( buffer2,newImg2);
 			
-			
-			char buffer1[50];
-			char buffer2[50];
-			sprintf(buffer1,"DoGImage1_%d_%d.jpg",o,s);
-			sprintf(buffer2,"DoGImage2_%d_%d.jpg",o,s);
-			imwrite( buffer1,newImg1);
-			imwrite( buffer2,newImg2);
-			
-			/*
-			namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
-			namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
-			//resizeWindow(img1.c_str(),800,600);
-			//resizeWindow(img2.c_str(),800,600);
-			imshow(img1.c_str(),newImg1);
-			imshow(img2.c_str(),newImg2);
+				namedWindow(buffer1,CV_WINDOW_NORMAL);
+				namedWindow(buffer2,CV_WINDOW_NORMAL);
+				//resizeWindow(img1.c_str(),800,600);
+				//resizeWindow(img2.c_str(),800,600);
+				//imshow(img1.c_str(),newImg1);
+				//imshow(img2.c_str(),newImg2);
 	
-			waitKey(0);	*/
+				waitKey(0);
+			}
 		}
 
 	}
@@ -1136,7 +1150,7 @@ int main()
 	GPU_CHECKERROR( cudaFree(d_imageStack1));
 	GPU_CHECKERROR( cudaFree(d_imageStack2));
 	
-	
+	return 0;
 	vector<KeyPoint> keyPoints1;
 	vector<KeyPoint> keyPoints2;
 	
