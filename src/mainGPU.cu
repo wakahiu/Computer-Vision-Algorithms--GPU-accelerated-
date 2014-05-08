@@ -190,7 +190,7 @@ __global__ void GaussianBlurr_GPU(unsigned char * d_imageArray,float * d_imageAr
 //
 // Gaussian Image blurr. Uses shared memory for speed up.
 //
-__global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * imageNext, float * keyPoints, int w,int h, int chan, int r){
+__global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * imageNext, float * keyPoints, int w,int h, int chan, int r,float threshold){
 	
 	
 	extern __shared__ float  picBlock[];
@@ -206,15 +206,12 @@ __global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * 
 	}
 	
 	int idx = (j*w+i)*chan;
-	keyPoints[idx+0] = imageCurr[idx+0];
-	keyPoints[idx+1] = imageCurr[idx+1];
-	keyPoints[idx+2] = imageCurr[idx+2];
 			
 	float dx = 0.0;
 	float dy = 0.0;
 	int patchCount = 0;
 	
-	//Calculate the gradient by considering neighbouring pixels.
+	//Calculate the x,y gradient by considering neighbouring pixels.
 	for(int k = 0; k < 3; k++){
 		float * curr;
 		switch(k){
@@ -231,31 +228,56 @@ __global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * 
 			}
 		}
 	}
-	
 	patchCount /= 2;
 	//Average the gradients.
 	dx /= patchCount;
 	dy /= patchCount;
 	
+	float ddx = 0;
+	float ddy = 0;
+	patchCount = 0;
+	//Calculate the x,y second gradient by considering neighbouring pixels.
+	for(int k = 0; k < 3; k++){
+		float * curr;
+		switch(k){
+			case 0: curr = imagePrev; break;
+			case 1: curr = imageCurr; break;
+			case 2: curr = imageNext; break;
+		}
+		for(int y = j-r+1; y <= j+r; y++){
+			for(int x = i-r+1; x <= i+r ; x++){
+				int kernIdx =  (y*w+x)*chan;
+				ddy = abs(y-j)>r ? dy + curr[kernIdx]: 2*(dy - curr[kernIdx]);
+				ddx = abs(x-i)>r ? dx + curr[kernIdx]: 2*(dx - curr[kernIdx]);
+				patchCount++;
+			}
+		}
+	}
+
+	patchCount /= 2;
+	//Average the gradients.
+	ddx /= patchCount;
+	ddy /= patchCount;
+		
 	//Gradient and magnitude.
-	keyPoints[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
-	keyPoints[idx+2] = atan2(dy,dx);				//Orientation of gradient
+	//keyPoints[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
+	//keyPoints[idx+2] = atan2(dy,dx);				//Orientation of gradient
 	
 	float D = imageCurr[idx];
 	
-	float threshold = 25.5;
+	__syncthreads();
 	//Early termination. These points are unlikely to be keypoints
 	//Anyway.
 	if(D < threshold ){
-		keyPoints[idx+0] = 0.0;
-		keyPoints[idx+1] = 0.0;
-		keyPoints[idx+2] = 0.0;			
+		keyPoints[idx+0] += 0.0f;
+		keyPoints[idx+1] += 0.0f;
+		keyPoints[idx+2] += 0.0f;			
 		return;
 	}
 	
 	/*
 	* All the subblocks are now in shared memory. Now we blurr the image.
-	*
+	*/
 
 	
 	//Key point localization.
@@ -271,27 +293,49 @@ __global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * 
 	
 	float R = (l1*l2 - 1e-8*(l1+l2)*(l1+l2));
 	
-	if( R > 0 ){
-			//Eliminate points along edges							
-			d_keyPoints[idx+0] = 0;
-			return;
+	float T1 = 1e-3;
+	if( abs(R) < T1 ){
+		//Eliminate points along edges							
+		keyPoints[idx+0] += 0;	//G
+		keyPoints[idx+1] += 0;	//G
+		keyPoints[idx+2] += 0;	//G
+		return;
+	}else if( R < T1){
+		//Eliminate points along edges							
+		keyPoints[idx+0] += 0;	//B
+		keyPoints[idx+1] += 0;	//G
+		keyPoints[idx+2] += 0;	//G
+		return;
+	}else{
+		//Corners
+		//keyPoints[idx+2] += 1;	//R
+	}
+
+	
+	patchCount = 0;
+	float ds_f =  0;	//Forwards
+	float ds_b =  0;	//Backwards	
+	for(int y = j-r+1; y <= j+r; y++){
+		for(int x = i-r+1; x <= i+r ; x++){
+			int kernIdx =  (y*w+x)*chan;
+			ds_f +=  (imageNext[kernIdx] -  imageCurr[kernIdx]);	//Forwards
+			ds_b +=  (imageCurr[kernIdx] -  imagePrev[kernIdx]);	//Backwards
+			patchCount++;
+		}
 	}
 	
+	patchCount/=2;
 	//First Derivative.
-	float ds_f =  d_imageNext[idx] -  d_imageCurr[idx];	//Forwards
-	float ds_b =  d_imageCurr[idx] -  d_imagePrev[idx];	//Backwards
+	ds_f /=  patchCount;	//Forwards
+	ds_b /=  patchCount;	//Backwards
 	
 	//Average them.
 	float ds = (ds_f + ds_b)/2;
 	float dxVec[3] = {-dx,-dy,-ds};
 
-	//Second Derivatives
-	float ddx = dx - dx_prev;
-	float ddy = dy - dy_prev;
-	float dds = ds_f - ds_b;
 	
-	dx_prev = dx;
-	dy_prev = dy;
+	//Second Derivatives
+	float dds = ds_f - ds_b;
 	
 	//Second derivative matrix
 
@@ -339,17 +383,24 @@ __global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * 
 							CCMat[2][0]*dxVec[0]+CCMat[2][1]*dxVec[1]+CCMat[2][2]*dxVec[2] };
 		
 		//Remove low contrast extrema.
-		float xbarThr = 0.5;
+		float xbarThr = 0.5f;
 		if( ( abs( XBarVec[0] ) > xbarThr || abs( XBarVec[1] ) > xbarThr || abs( XBarVec[2] ) > xbarThr ) ){
-			d_keyPoints[idx+0] = 0;
+			keyPoints[idx+0] += 0;	//G
+			keyPoints[idx+1] += 0;	//G
+			keyPoints[idx+2] += 0;	//G
 			return;
 		}else{
-			D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0;	
+			D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0f;
+			keyPoints[idx+1] += D;
+			return;
 		}
 	}	
 	
-	d_keyPoints[idx+0] = D;
-	*/
+	keyPoints[idx+0] += 0;	//B
+	keyPoints[idx+1] += 0;	//G
+	keyPoints[idx+2] += 0;	//G	
+	
+	
 }
 
 //Find the 3d image gradients from a stack of Difference of gaussians. 
@@ -417,9 +468,10 @@ Mat imageGradient_GPU(	float * d_imageStack, Mat plotImg, int octaves, int scale
 			int prevIdx = (po*scales + ps)*rows*cols*chan;
 			int	currIdx = (o*scales + s)*rows*cols*chan;
 			int nextIdx = (no*scales + ns)*rows*cols*chan;			
-	
+			float threshold = 20.0f/(s*(o+1));
 			detectKeyPoints_GPU<<< numBlocks, numThreads , sharedBlockSZ >>>
-				(&d_imageStack[prevIdx],&d_imageStack[currIdx],&d_imageStack[nextIdx],d_keyPoints, cols, rows, chan,hwGrad);
+					(&d_imageStack[prevIdx],&d_imageStack[currIdx],&d_imageStack[nextIdx],
+					d_keyPoints, cols, rows, chan,hwGrad,threshold);
 			
 			GPU_CHECKERROR( cudaGetLastError() );
 			GPU_CHECKERROR( cudaDeviceSynchronize() );
