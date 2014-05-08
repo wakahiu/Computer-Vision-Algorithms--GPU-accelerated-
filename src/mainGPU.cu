@@ -7,31 +7,6 @@
 #define D_MAX 50		//10000Bytes < 64KB
 __constant__ float d_const_Gaussian[D_MAX*D_MAX];
 
-//Converts the image to gray scale using equal weighting.
-Mat toGray(Mat img){
-	
-	Mat grayImg( img.rows, img.cols,CV_8UC3);
-	unsigned char * imgPtr = (unsigned char *)img.data;
-	unsigned char * grayPtr = (unsigned char *)grayImg.data;
-	
-	for(int j = 0; j < img.rows; j++){
-		for(int i = 0; i <img.cols*3; i+=3){
-		
-			int b = imgPtr[img.step*j+i];
-			int g = imgPtr[img.step*j+i+1];
-			int r = imgPtr[img.step*j+i+2];
-			
-			int gscale = (b+g+r)/3;
-			
-			grayPtr[img.step*j+i] = gscale;
-			grayPtr[img.step*j+i+1] = gscale;
-			grayPtr[img.step*j+i+2] = gscale;
-		}
-	}
-	return grayImg;
-	
-}
-
 //
 // Convert to gray scale. Each thread operates on a pixel.
 //
@@ -59,45 +34,7 @@ __global__ void toGray_GPU(unsigned char * d_imageArray,int w,int h){
 	d_imageArray[--idx] = tempR;
 	
 }
-
-//Find candidate keypoints as a local extrema of DOG images across scales
-//Compare each pixel to it's neigbouring pixels.
-
-Mat GaussianBlurr(Mat img, float * GaussKernel,int hw){
-
-	Mat blurr_img( img.rows,img.cols,CV_32FC3);
 	
-	int w = 2*hw+1;
-	int bstep = blurr_img.step/4;
-	unsigned char * imgPtr = (unsigned char *)img.data;
-	float * blurrPtr = (float *)blurr_img.data;
-	
-	for(int j = 0+hw; j < (img.rows-hw); j++){
-		for(int i = 0+hw; i <(img.cols-hw)*3; i+=3){
-		
-			
-			float b =0;
-			float g =0;
-			float r =0;
-			
-			for(int y = -hw; y <= hw; y++){
-				for(int x = -hw; x <= hw ;x++){
-					float k = GaussKernel[ (y+hw)*w + x + hw];
-					b += imgPtr[img.step*(j+y)+(i+x)+0]*k;
-					g += imgPtr[img.step*(j+y)+(i+x)+1]*k;
-					r += imgPtr[img.step*(j+y)+(i+x)+2]*k;
-				}
-			}
-			
-			blurrPtr[bstep*j+i+0] = b;
-			blurrPtr[bstep*j+i+1] = g;
-			blurrPtr[bstep*j+i+2] = r;
-			
-			
-		}
-	}
-	return blurr_img;
-}	
 
 //Plots a green dot around point (x,y)
 void plot(Mat img,int x,int y,int b, int g, int r){
@@ -133,42 +70,14 @@ __global__ void imageDiff_GPU(float * d_image1, float * d_image2,float * diff_im
 	//store the blurrred image.
 	unsigned int idx = ((y * w) + x)*3;
 	
-	diff_img[idx+0] = 20*abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
-	diff_img[idx+1] = 20*abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
-	diff_img[idx+2] = 20*abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
+	diff_img[idx+0] = abs((d_image2[idx+0]-d_image1[idx+0])/(1-s));
+	diff_img[idx+1] = abs((d_image2[idx+1]-d_image1[idx+1])/(1-s));
+	diff_img[idx+2] = abs((d_image2[idx+2]-d_image1[idx+2])/(1-s));
 }
 
-//Find the difference in image instensity 
-Mat imageDiff(Mat image1, Mat image2, float s){
-
-	//Consider using integers/floats instead of unsigned Uint_8
-	Mat imgDiff( image1.rows, image1.cols,CV_32FC3);
-	
-	float * img1Ptr = (float *)image1.data;
-	float * img2Ptr = (float *)image2.data;
-	float * resultPtr = (float *)imgDiff.data;
-	
-	int  step = imgDiff.step/4;
-	
-	for(int j =0 ; j < image1.rows ; j++){
-		for(int i = 0 ; i < step; i += 3){
-		
-			float diff_b = abs((img2Ptr[step*j+i+0] - img1Ptr[step*j+i+0])/(1-s));
-			float diff_g = abs((img2Ptr[step*j+i+1] - img1Ptr[step*j+i+1])/(1-s));
-			float diff_r = abs((img2Ptr[step*j+i+2] - img1Ptr[step*j+i+2])/(1-s)); 
-			
-			resultPtr[step*j+i+0] = diff_b;
-			resultPtr[step*j+i+1] = diff_g;
-			resultPtr[step*j+i+2] = diff_r;
-			
-		}
-	}
-	return imgDiff;
-}
 //
 // Gaussian Image blurr. Uses shared memory for speed up.
 //
-
 __global__ void GaussianBlurr_GPU(unsigned char * d_imageArray,float * d_imageArrayResult, int w,int h, int r){
 	
 	int d = 2*r + 1;
@@ -278,290 +187,11 @@ __global__ void GaussianBlurr_GPU(unsigned char * d_imageArray,float * d_imageAr
 	d_imageArrayResult[idx++] = tempR;	
 }
 
-//Find the 3d image gradients from a stack of Difference of gaussians. 
-Mat imageGradient(Mat* imageStack, Mat plotImg, int octaves, int scales, float threshold , int hwGrad, int hwFeat, vector<KeyPoint> &kp){
-	
-	float count = 0.0;
-	
-	//Assumes all the images have the same dimensions.
-	int rows = imageStack[0].rows;
-	int cols = imageStack[0].cols;
-	int step = imageStack[0].step/4;
-	
-	Mat newImg( rows, cols, CV_32FC3);
-	float * newPtr = (float *)newImg.data;
-	
-	Mat 	dataMat( rows, cols, CV_32FC4 );
-	float *	dataMatPtr = (float *)dataMat.data;
-	int 	dataMatStep = dataMat.step/4;
-	
-	cout  << "dataMatStep " << dataMatStep << endl;
-	
-	//Assumes sigma increases as the scale and octave increases.
-	
-	//Loops within loops within loops ad infinitum...
-	//We cycle over all the images on the stack [octaves x scales] and all the
-	//pixels in an image then consider all the neighbouring pixels.
-	for(int o = 0; o < octaves ; o++ ){
-		for(int s = 1 ; s < scales-1 ; s++ ){
-		
-			float sigmaScale = pow(2,o)*((float)s/SCALES+1 + 0.5/SCALES); 
-			cout << sigmaScale << endl;
-			float maxD = 0.0;
-			
-			int ns = (s+1)%scales;
-			int ps = (s+scales-1)%scales;
-			int no = o;
-			int po = o;
-			
-			cout << "s " << s << " ns " << ns << " ps " << ps << endl;
-			cout << "o " << o << " no " << no << " po " << po << endl;
-			
-			Mat currImg = imageStack[o*scales + s];
-			Mat nextImg = imageStack[no*scales + ns];
-			Mat prevImg = imageStack[po*scales + ps];
-			
-			Mat tempImg( rows, cols, CV_32FC3);
-	
-			float * tempPtr = (float *)tempImg.data;
-	
-			float * currPtr = (float *)currImg.data;
-			float * nextPtr = (float *)nextImg.data;
-			float * prevPtr = (float *)prevImg.data;
-			
-			float dx_prev = 0.0;
-			float dy_prev = 0.0;
-			
-			//Now we have the image. Consider all the pixels. Remove unstable 
-			//Keypoints
-			for(int j =1 ; j < rows-1; j++ ){
-				for(int i = 3 ; i < step-3; i += 3){
-					
-					int idx = step*j + i;
-					
-					//Ignore edge pixels.
-					if( j < hwGrad || i < 3*hwGrad || j >= rows -hwGrad || i >= (step -3*hwGrad)){
-						tempPtr[idx+0] = 0;
-						tempPtr[idx+1] = 0;
-						tempPtr[idx+2] = 0;
-						continue;
-					}
-					
-					float dx = 0.0;
-					float dy = 0.0;
-					int patchCount = 0;
-					
-					//Calculate the gradient by considering neighbouring pixels.
-					for(int y = j-hwGrad; y <= j+hwGrad; y++){
-						for(int x = i-hwGrad*3; x <= i+hwGrad*3 ;x+=3){
-						
-							int kernIdx = step*y + x;
-							dx += currPtr[kernIdx+3] - currPtr[kernIdx];
-							dy += currPtr[kernIdx+step] - currPtr[kernIdx];
-							patchCount++;
-						}
-					}
-					//Average the gradients.
-					dx /= patchCount;
-					dy /= patchCount;
-					
-					//Gradient and magnitude.
-					tempPtr[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
-					tempPtr[idx+2] = atan2(dy,dx);				//Orientation of gradient
-					float D = currPtr[idx];
-					
-					//Early termination. These points are unlikely to be keypoints
-					//Anyway.
-					if(D < threshold ){
-						tempPtr[idx+0] = 0.0;			
-						continue;
-					}
-					
-					//Key point localization.
-					//Eliminate points along the edges.
-					float a = dx*dx;
-					float b = 2*dx*dy;
-					float c = dy*dy;
-					
-					float elipDet = (b*b+(a-c)*(a-c));
-
-					float l1 = 0.5*(a+c+sqrt(elipDet));
-					float l2 = 0.5*(a+c-sqrt(elipDet));
-					
-					float R = (l1*l2 - 1e-8*(l1+l2)*(l1+l2));
-					
-					if( R < 0 ){
-							//Eliminate points along edges							
-							tempPtr[idx+0] = 0;
-							continue;
-					}else{
-						//cout << tempPtr[idx+1] << " ";
-					}
-					
-					//First Derivative.
-					float ds_f = nextPtr[idx] - currPtr[idx];	//Forwards
-					float ds_b = currPtr[idx] - prevPtr[idx];	//Backwards
-					
-					//Average them.
-					float ds = (ds_f + ds_b)/2;
-					float dxVec[3] = {-dx,-dy,-ds};
-	
-					//Second Derivatives
-					float ddx = dx - dx_prev;
-					float ddy = dy - dy_prev;
-					float dds = ds_f - ds_b;
-					
-					dx_prev = dx;
-					dy_prev = dy;
-					
-					//Second derivative matrix
-				
-					float DDMat[3][3] ={{ddx,	dx*dy,	dx*ds},
-										{dy*dx,	ddy,	dy*ds},
-										{ds*dx,	ds*dy,	dds}};
-				
-					//Now get its inverse.
-					float det =(DDMat[0][0]*DDMat[1][1]*DDMat[2][2] +
-								DDMat[0][1]*DDMat[1][2]*DDMat[2][0] +
-								DDMat[0][2]*DDMat[1][0]*DDMat[2][1]	) 
-								-
-							   (DDMat[0][2]*DDMat[1][1]*DDMat[2][0] +
-								DDMat[0][1]*DDMat[1][0]*DDMat[2][2] +
-								DDMat[0][0]*DDMat[1][2]*DDMat[2][1]	);
-				
-					
-					if(det != 0){
-						
-						//Adjugate matrix. Matrix of coffactors.
-						float CC_00 = DDMat[1][1]*DDMat[2][2] - DDMat[1][2]*DDMat[2][1];
-						float CC_01 = DDMat[0][2]*DDMat[2][1] - DDMat[0][1]*DDMat[2][2];
-						float CC_02 = DDMat[0][1]*DDMat[1][2] - DDMat[0][2]*DDMat[1][1];
-				
-						float CC_10 = DDMat[1][2]*DDMat[2][0] - DDMat[1][0]*DDMat[2][2];
-						float CC_11 = DDMat[0][0]*DDMat[2][2] - DDMat[0][2]*DDMat[2][0];
-						float CC_12 = DDMat[0][2]*DDMat[1][0] - DDMat[0][0]*DDMat[1][2];
-				
-						float CC_20 = DDMat[1][0]*DDMat[2][1] - DDMat[1][1]*DDMat[2][0];
-						float CC_21 = DDMat[0][1]*DDMat[2][0] - DDMat[0][0]*DDMat[2][1];
-						float CC_22 = DDMat[0][0]*DDMat[1][1] - DDMat[0][1]*DDMat[1][0];
-					
-						float CCMat[3][3] ={{CC_00,	CC_01,	CC_02},
-											{CC_10,	CC_11,	CC_12},
-											{CC_20,	CC_21,	CC_22}};
-					
-						//Inverse matrix.
-						CCMat[0][0] /= det;	CCMat[0][1] /= det;	CCMat[0][2] /= det;
-						CCMat[1][0] /= det;	CCMat[1][1] /= det;	CCMat[1][2] /= det;
-						CCMat[2][0] /= det;	CCMat[2][1] /= det;	CCMat[2][2] /= det;
-				
-						//Aproximation factors
-						float XBarVec[3]=	{CCMat[0][0]*dxVec[0]+CCMat[0][1]*dxVec[1]+CCMat[0][2]*dxVec[2],
-											CCMat[1][0]*dxVec[0]+CCMat[1][1]*dxVec[1]+CCMat[1][2]*dxVec[2],
-											CCMat[2][0]*dxVec[0]+CCMat[2][1]*dxVec[1]+CCMat[2][2]*dxVec[2] };
-						
-						//Remove low contrast extrema.
-						float xbarThr = 0.5;
-						if( ( abs( XBarVec[0] ) > xbarThr || abs( XBarVec[1] ) > xbarThr || abs( XBarVec[2] ) > xbarThr ) ){
-							tempPtr[idx+0] = 0;
-							continue;
-						}else{
-							D += (XBarVec[0]*dxVec[0]+ XBarVec[1]*dxVec[1] + XBarVec[2]*dxVec[2])/2.0;	
-						}
-					}	
-					
-					tempPtr[idx+0] = D;
-
-				}
-			}
-			
-			
-			//Done getting robust keypoints and calculating image attributes.
-			//Now we calculate the feature descriptor vectors. x, y, scale and orienation. 
-			
-			for(int j =0 ; j < rows; j++ ){
-				for(int i = 0  ; i < step; i += 3){
-				
-					int idx = step*j + i;
-					int dataMatidx = dataMatStep*j + i;
-					
-					//Ignore edge pixels.
-					if( j < hwFeat || i < 3*hwFeat || j >= rows -hwFeat || i >= (step -3*hwFeat)){
-						dataMatPtr[dataMatidx+0] = 0;
-						dataMatPtr[dataMatidx+1] = 0;
-						dataMatPtr[dataMatidx+2] = 0;
-						dataMatPtr[dataMatidx+3] = 0;
-						continue;
-					}
-					
-					bool isKeyPoint = ((tempPtr[idx+0]) >=  threshold);
-					
-					float phi = M_PI /18.0;		//Radians per bin.
-					
-					if(isKeyPoint){
-					
-						dataMatPtr[dataMatidx+0] = i/3;		//Position	x
-						dataMatPtr[dataMatidx+1] = j;		//Position	y
-						
-						float bins[36];
-						float 	aveMag = 0.0;
-						for(int m = 0; m < 36 ; m++){
-							bins[m] = 0;
-						}
-						
-						//Assigning orientation. Use 36 bins and weight sample 
-						//by gradient magnitude and gaussian
-						for(int y = j-hwFeat; y <= j+hwFeat; y++){
-							for(int x = i-hwFeat*3; x <= i+hwFeat*3 ;x+=3){
-							
-								int 	kernIdx = step*y + x;
-								float 	mag = tempPtr[kernIdx+1];
-								float	dir = tempPtr[kernIdx+2];
-					
-								int binIdx = dir/phi+17;
-								bins[binIdx] += mag * sigmaScale;
-								aveMag += mag; 
-								
-							}
-						}
-						
-						//Assign the orientation as the highest peak. There could be
-						//More peaks which get substantially close to the max value.
-						//Also perform polynomial curve fitting for more acurate 
-						//Orientation. Will see if all this work is worth doing.
-						float highestPeak =0.0;
-						for(int m = 0; m < 36 ; m++){
-							if(bins[m] > highestPeak){
-								highestPeak = bins[m];
-							}
-							//cout << bins[m] << " ";
-						} 
-						dataMatPtr[dataMatidx+2] = highestPeak;		//scale
-						dataMatPtr[dataMatidx+3] = sigmaScale;
-						
-						//plot( plotImg , i/3 , j , 0 , 255 , 0 );
-						count++;
-						
-						KeyPoint newKp(i/3,j,sigmaScale,highestPeak,o);
-						kp.push_back( newKp );
-						
-					}
-					continue;	
-				}	
-			}
-			
-			
-		}
-	}
-	
-	cout << "count " << count << endl;
-	return newImg;
-	
-}
-
 //
 // Gaussian Image blurr. Uses shared memory for speed up.
 //
-__global__ void detectKeyPoints_GPU(float * d_imagePrev,float * d_imageCurr,float * d_imageNext, float * d_keyPoints, int w,int h, int r){
+__global__ void detectKeyPoints_GPU(float * imagePrev,float * imageCurr,float * imageNext, float * keyPoints, int w,int h, int chan, int r){
+	
 	
 	extern __shared__ float  picBlock[];
 	
@@ -571,91 +201,55 @@ __global__ void detectKeyPoints_GPU(float * d_imagePrev,float * d_imageCurr,floa
 	if(i >= w || j >= h)
 		return;
 	
-	int d = 2*r + 1;
-	unsigned int idxN, idxS, idxW, idxE;
-	float tempR = 0.0;
-    float tempG = 0.0;
-    float tempB = 0.0;
-	float Gaus_val = 0.0;
-	int	shDim_x = (blockDim.x + 2*r);
-	int offset = (blockDim.x + 2*r)*(blockDim.y + 2*r);
-	int x, y;
-	int xSh, ySh;
-	
-	//Copy the image into shared memory
-	//Blocks that do not require boundry check
-	if( (blockIdx.x*blockDim.x >=  r )		&& (blockIdx.y*blockDim.y >=  r) &&
-		(((blockIdx.x+1)*blockDim.x +r) < w)	&& (((blockIdx.y+1)*blockDim.y +r) < h)){	
-		
-		//Collaborative loading into shared memory
-		for( y = j-r, ySh = threadIdx.y ; y< (blockDim.y*(blockIdx.y + 1) + r)  ; y+=blockDim.y , ySh+=blockDim.y ){
-			for( x = i-r, xSh = threadIdx.x ; x < (blockDim.x*(blockIdx.x + 1) + r)  ; x+=blockDim.x , xSh+=blockDim.x){
-				picBlock[(ySh*shDim_x+xSh)] = d_imageCurr[(y*w+x)*3];
-				picBlock[(ySh*shDim_x+xSh)+offset] = d_imageCurr[(y*w+x)*3+1];
-				picBlock[(ySh*shDim_x+xSh)+offset*2] = d_imageCurr[(y*w+x)*3+2];
-			}
-		}
-	}
-	/*
-	//These blocks may access picture elements that are out of bounds
-	else{
-		int xLim = blockDim.x*(blockIdx.x + 1) > w ? w : (blockDim.x*(blockIdx.x + 1) + r) ;
-		int yLim = blockDim.y*(blockIdx.y + 1) > h ? h : (blockDim.y*(blockIdx.y + 1) + r);
-		int xStep = blockDim.x*(blockIdx.x + 1) > w ? w%blockDim.x : blockDim.x ;
-		int yStep = blockDim.y*(blockIdx.y + 1) > h ? h%blockDim.y : blockDim.y ;
-		
-		//Collaborative loading into shared memory
-		for( y = j-r, ySh = threadIdx.y ; y < yLim ; ySh+=yStep , y +=yStep ){
-			for( x = i-r, xSh = threadIdx.x ; x < xLim ; xSh+=xStep , x +=xStep){
-				
-				idxN = y<0? 0 : (y>=h ? h-1 : y );
-				idxS = x<0? 0 : (x>=w ? w-1 : x );
-	
-				picBlock[(ySh*shDim_x+xSh)] = d_imageCurr[(idxN*w+idxS)*3];
-				picBlock[(ySh*shDim_x+xSh)+offset] = d_imageCurr[(idxN*w+idxS)*3+1];
-				picBlock[(ySh*shDim_x+xSh)+offset*2] = d_imageCurr[(idxN*w+idxS)*3+2];			
-			}
-		}
-		
-	}
-	__syncthreads();		//Make sure every thread has loaded all its portions.
-	
-	int idx = w*j*3+i;
-	//Ignore edge pixels.
-	if( j < r || i < r || j >= h -r || i >= (w - r)){
-		d_keyPoints[idx+0] = 0;
-		d_keyPoints[idx+1] = 0;
-		d_keyPoints[idx+2] = 0;
+	if(i < r || i >= (w-r) || j < r || j >= (h-r)){
 		return;
 	}
-	/*
+	
+	int idx = (j*w+i)*chan;
+	keyPoints[idx+0] = imageCurr[idx+0];
+	keyPoints[idx+1] = imageCurr[idx+1];
+	keyPoints[idx+2] = imageCurr[idx+2];
+			
 	float dx = 0.0;
 	float dy = 0.0;
 	int patchCount = 0;
 	
 	//Calculate the gradient by considering neighbouring pixels.
-	for(int y = j-r; y <= j+r; y++){
-		for(int x = i-r*3; x <= i+r*3 ;x+=3){
-		
-			int kernIdx = shDim_x*y + x;
-			dx += picBlock[kernIdx+3] - 		picBlock[kernIdx];
-			dy += picBlock[kernIdx+shDim_x] - 	picBlock[kernIdx];
-			patchCount++;
+	for(int k = 0; k < 3; k++){
+		float * curr;
+		switch(k){
+			case 0: curr = imagePrev; break;
+			case 1: curr = imageCurr; break;
+			case 2: curr = imageNext; break;
+		}
+		for(int y = j-r+1; y <= j+r; y++){
+			for(int x = i-r+1; x <= i+r ; x++){
+				int kernIdx =  (y*w+x)*chan;
+				dy = (y>j) ? dy + curr[kernIdx]: dy - curr[kernIdx];
+				dx = (x>i) ? dx + curr[kernIdx]: dx - curr[kernIdx];
+				patchCount++;
+			}
 		}
 	}
+	
+	patchCount /= 2;
 	//Average the gradients.
 	dx /= patchCount;
 	dy /= patchCount;
 	
 	//Gradient and magnitude.
-	d_keyPoints[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
-	d_keyPoints[idx+2] = atan2(dy,dx);				//Orientation of gradient
-	float D = currPtr[idx];
+	keyPoints[idx+1] = sqrt(dx*dx + dy*dy);		//Magnitude of gradient
+	keyPoints[idx+2] = atan2(dy,dx);				//Orientation of gradient
 	
+	float D = imageCurr[idx];
+	
+	float threshold = 25.5;
 	//Early termination. These points are unlikely to be keypoints
 	//Anyway.
 	if(D < threshold ){
-		d_keyPoints[idx+0] = 0.0;			
+		keyPoints[idx+0] = 0.0;
+		keyPoints[idx+1] = 0.0;
+		keyPoints[idx+2] = 0.0;			
 		return;
 	}
 	
@@ -677,7 +271,7 @@ __global__ void detectKeyPoints_GPU(float * d_imagePrev,float * d_imageCurr,floa
 	
 	float R = (l1*l2 - 1e-8*(l1+l2)*(l1+l2));
 	
-	if( R < 0 ){
+	if( R > 0 ){
 			//Eliminate points along edges							
 			d_keyPoints[idx+0] = 0;
 			return;
@@ -771,59 +365,82 @@ Mat imageGradient_GPU(	float * d_imageStack, Mat plotImg, int octaves, int scale
 		printf("Shared Memory exceeded allocated size per block: %lu Max %lu\n",sharedBlockSZ, dev_prop_curr.sharedMemPerBlock);
 		exit(0);
 	}
-		
+	
 		
 	//Assumes all the images have the same dimensions.
 	int rows = plotImg.rows;
 	int cols = plotImg.cols;
-	int step = plotImg.step;
 	int chan = plotImg.channels();
-	
+
+	Mat 	dataMat( rows, cols, CV_32FC3 );
+	float *	dataMatPtr = (float *)dataMat.data;	
+			
+				
 	Mat newImg( rows, cols, CV_32FC3);
-	float * newPtr = (float *)newImg.data;
 	
-	Mat 	dataMat( rows, cols, CV_32FC4 );
-	float *	dataMatPtr = (float *)dataMat.data;
-	int 	dataMatStep = dataMat.step;		//<< TODO
+	cout << "rows " << rows << " cols " << cols << " chans "  << chan << endl;
+	
+	/*
+	* Allocate space for the matrix holding keypoints
+	*/
+	size_t  keypointsMatSize = sizeof(float)*rows*cols*chan;
+	float * d_keyPoints;
+	GPU_CHECKERROR( cudaMalloc((void **)&d_keyPoints, keypointsMatSize) );
+	GPU_CHECKERROR( cudaMemset((void *)d_keyPoints, 0, keypointsMatSize) );
 			
 			
 	//Assumes sigma increases as the scale and octave increases.
 	
-	//Loops within loops within loops ad infinitum...
+	if(scales < 3){
+		cerr << "Can't compute gradients. Too few images!" << scales << endl;
+		exit(0);
+	}
+	
 	//We cycle over all the images on the stack [octaves x scales] and all the
 	//pixels in an image then consider all the neighbouring pixels.
-	for(int o = 1; o < (octaves-1) ; o++ ){
-		for(int s = 0 ; s < scales ; s++ ){
+	for(int o = 0; o < octaves ; o++ ){
+		for(int s = 1 ; s < (scales-1) ; s++ ){
 		
 			
 			//float sigmaScale = pow(2,o)*((float)s/SCALES+1 + 0.5/SCALES); 
 			//cout << sigmaScale << endl;
 			
 			
-			int ns = s;
-			int ps = s;
-			int no = (o+1)%octaves;
-			int po = (o+octaves-1)%octaves;
+			int ns = (s+1)%scales;
+			int ps = (s+scales-1)%scales;
+			int no = o;
+			int po = o;
 			
 			cout << "s " << s << " ns " << ns << " ps " << ps << endl;
 			cout << "o " << o << " no " << no << " po " << po << endl << endl;
 			
 			int prevIdx = (po*scales + ps)*rows*cols*chan;
 			int	currIdx = (o*scales + s)*rows*cols*chan;
-			int nextIdx = (no*scales + ns)*rows*cols*chan;
-			
-			float * d_keyPoints;
-			GPU_CHECKERROR( cudaMalloc((void **)&d_keyPoints, sizeof(float)*rows*cols*chan) );
+			int nextIdx = (no*scales + ns)*rows*cols*chan;			
 	
 			detectKeyPoints_GPU<<< numBlocks, numThreads , sharedBlockSZ >>>
-				(&d_imageStack[prevIdx],&d_imageStack[currIdx],&d_imageStack[nextIdx],d_keyPoints, cols, rows,hwGrad);
+				(&d_imageStack[prevIdx],&d_imageStack[currIdx],&d_imageStack[nextIdx],d_keyPoints, cols, rows, chan,hwGrad);
 			
 			GPU_CHECKERROR( cudaGetLastError() );
 			GPU_CHECKERROR( cudaDeviceSynchronize() );
-			
 		}
 	}
 	
+	GPU_CHECKERROR( cudaMemcpy( dataMatPtr, 
+								d_keyPoints, 
+								keypointsMatSize, 
+								cudaMemcpyDeviceToHost ) );
+		
+	bool show = true;
+	if(show){
+		namedWindow("keypoints",CV_WINDOW_NORMAL);
+		imshow("keypoints",dataMat);
+		imwrite("keypoints.jpg",dataMat);
+		waitKey(0);
+	}
+	
+	
+	GPU_CHECKERROR( cudaFree(d_keyPoints) );
 	cout << "count " << count << endl;
 	return newImg;
 	
@@ -1045,6 +662,7 @@ int main()
 										sizeof(float)*rows*cols*chan, 
 										cudaMemcpyDeviceToHost ) );
 			
+			//show = true;
 			if(show){
 				char buffer1[50];
 				char buffer2[50];
@@ -1115,7 +733,6 @@ int main()
 			Mat newImg2( rows, cols, CV_32FC3);
 			float * newPtr2 = (float *)newImg2.data;
 			
-			cout << prevIdx << endl;
 			GPU_CHECKERROR( cudaMemcpy( newPtr1, 
 										&d_diffImg1[currIdx], 
 										sizeof(float)*rows*cols*chan, 
@@ -1138,8 +755,8 @@ int main()
 				namedWindow(buffer2,CV_WINDOW_NORMAL);
 				//resizeWindow(img1.c_str(),800,600);
 				//resizeWindow(img2.c_str(),800,600);
-				//imshow(img1.c_str(),newImg1);
-				//imshow(img2.c_str(),newImg2);
+				imshow(buffer1,newImg1);
+				imshow(buffer2,newImg2);
 	
 				waitKey(0);
 			}
@@ -1150,7 +767,6 @@ int main()
 	GPU_CHECKERROR( cudaFree(d_imageStack1));
 	GPU_CHECKERROR( cudaFree(d_imageStack2));
 	
-	return 0;
 	vector<KeyPoint> keyPoints1;
 	vector<KeyPoint> keyPoints2;
 	
@@ -1171,18 +787,16 @@ int main()
 	GPU_CHECKERROR( cudaFree(d_diffImg1));
 	GPU_CHECKERROR( cudaFree(d_diffImg2));
 	
-	namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
-	namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
-	//resizeWindow(img1.c_str(),800,600);
-	//resizeWindow(img2.c_str(),800,600);
-	imshow(img1.c_str(),img1Result);
-	imshow(img2.c_str(),img1Result);
-	
+	if(show){
+		namedWindow(img1.c_str(),CV_WINDOW_NORMAL);
+		namedWindow(img2.c_str(),CV_WINDOW_NORMAL);
+		//resizeWindow(img1.c_str(),800,600);
+		//resizeWindow(img2.c_str(),800,600);
+		imshow(img1.c_str(),img1Result);
+		imshow(img2.c_str(),img1Result);
+		waitKey(0);
+	}
 
-	
-	waitKey(0);
-
-	return 0;
 	/*
 	
 	cout << keyPoints1.size() << endl;
@@ -1293,6 +907,5 @@ int main()
 	resizeWindow("Result",900,400);
 	imshow("Result", result );
 	*/
-	waitKey(0);
     return 0;
 }
